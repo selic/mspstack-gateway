@@ -13,6 +13,8 @@
 
 import type { CatalogEntry, Tier } from "./catalog.js";
 import type { Repo, RoleRow } from "../db/repo.js";
+import type { Principal } from "../auth/principal.js";
+import { prefsIdentity } from "../auth/principal.js";
 
 export type { Tier };
 export type MaxTier = Tier | "none";
@@ -61,5 +63,23 @@ export class PolicyService {
 
   visibleEntries(roleId: number, entries: Iterable<CatalogEntry>): CatalogEntry[] {
     return [...entries].filter((entry) => this.allows(roleId, entry));
+  }
+
+  /**
+   * Personal narrowing (slice 3): effective = admin envelope ∧ user prefs.
+   * Prefs are deny-only rows (an upstream-wide '' row or a per-tool row), so
+   * this can only ever REMOVE access relative to allows() — never widen it.
+   * Same function gates tools/list and tools/call, like the envelope itself.
+   */
+  allowsFor(principal: Principal, entry: CatalogEntry): boolean {
+    if (!this.allows(principal.roleId, entry)) return false;
+    const who = prefsIdentity(principal);
+    if (this.repo.userPrefFor(who, entry.upstreamId, "") === false) return false;
+    if (this.repo.userPrefFor(who, entry.upstreamId, entry.upstreamToolName) === false) return false;
+    return true;
+  }
+
+  visibleEntriesFor(principal: Principal, entries: Iterable<CatalogEntry>): CatalogEntry[] {
+    return [...entries].filter((entry) => this.allowsFor(principal, entry));
   }
 }

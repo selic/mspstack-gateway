@@ -46,6 +46,22 @@ export interface GroupMappingRow {
   roleId: number;
 }
 
+export interface UserPrefRow {
+  principal: string;
+  upstreamId: string;
+  /** '' = the whole upstream. */
+  toolName: string;
+  enabled: boolean;
+}
+
+export interface UserCredentialRow {
+  principal: string;
+  upstreamId: string;
+  field: string;
+  secretRef: string;
+  updatedAt: string;
+}
+
 export class Repo {
   constructor(private readonly db: DatabaseSync) {}
 
@@ -354,6 +370,80 @@ export class Repo {
       .get(iss, ...groups) as Record<string, unknown> | undefined;
     return row ? mapRole(row) : null;
   }
+
+  // ── user prefs (personal narrowing — slice 3) ──
+
+  /** All narrowing rows for a principal. tool_name '' = the whole upstream. */
+  listUserPrefs(principal: string): UserPrefRow[] {
+    return (
+      this.db
+        .prepare("SELECT * FROM user_prefs WHERE principal = ? ORDER BY upstream_id, tool_name")
+        .all(principal) as Record<string, unknown>[]
+    ).map(mapUserPref);
+  }
+
+  userPrefFor(principal: string, upstreamId: string, toolName: string): boolean | null {
+    const row = this.db
+      .prepare(
+        "SELECT enabled FROM user_prefs WHERE principal = ? AND upstream_id = ? AND tool_name = ?"
+      )
+      .get(principal, upstreamId, toolName) as { enabled: number } | undefined;
+    return row === undefined ? null : row.enabled === 1;
+  }
+
+  /**
+   * enabled=false stores a personal deny; enabled=true DELETES the row —
+   * "enable" only ever removes personal narrowing, it can never widen the
+   * admin envelope (the policy AND takes care of the rest).
+   */
+  setUserPref(principal: string, upstreamId: string, toolName: string, enabled: boolean): void {
+    if (enabled) {
+      this.db
+        .prepare(
+          "DELETE FROM user_prefs WHERE principal = ? AND upstream_id = ? AND tool_name = ?"
+        )
+        .run(principal, upstreamId, toolName);
+      return;
+    }
+    this.db
+      .prepare(
+        `INSERT INTO user_prefs (principal, upstream_id, tool_name, enabled) VALUES (?, ?, ?, 0)
+         ON CONFLICT (principal, upstream_id, tool_name) DO UPDATE SET enabled = 0`
+      )
+      .run(principal, upstreamId, toolName);
+  }
+
+  // ── user credentials (registered refs only — never values) ──
+
+  listUserCredentials(principal: string): UserCredentialRow[] {
+    return (
+      this.db
+        .prepare(
+          "SELECT * FROM user_credentials WHERE principal = ? ORDER BY upstream_id, field"
+        )
+        .all(principal) as Record<string, unknown>[]
+    ).map(mapUserCredential);
+  }
+
+  upsertUserCredential(principal: string, upstreamId: string, field: string, secretRef: string): void {
+    this.db
+      .prepare(
+        `INSERT INTO user_credentials (principal, upstream_id, field, secret_ref, updated_at)
+         VALUES (?, ?, ?, ?, datetime('now'))
+         ON CONFLICT (principal, upstream_id, field)
+         DO UPDATE SET secret_ref = excluded.secret_ref, updated_at = datetime('now')`
+      )
+      .run(principal, upstreamId, field, secretRef);
+  }
+
+  deleteUserCredential(principal: string, upstreamId: string, field: string): boolean {
+    const result = this.db
+      .prepare(
+        "DELETE FROM user_credentials WHERE principal = ? AND upstream_id = ? AND field = ?"
+      )
+      .run(principal, upstreamId, field);
+    return result.changes > 0;
+  }
 }
 
 const mapRole = (row: Record<string, unknown>): RoleRow => ({
@@ -380,4 +470,19 @@ const mapUser = (row: Record<string, unknown>): UserRow => ({
   displayName: (row.display_name as string | null) ?? null,
   roleId: (row.role_id as number | null) ?? null,
   lastLoginAt: (row.last_login_at as string | null) ?? null,
+});
+
+const mapUserPref = (row: Record<string, unknown>): UserPrefRow => ({
+  principal: row.principal as string,
+  upstreamId: row.upstream_id as string,
+  toolName: row.tool_name as string,
+  enabled: row.enabled === 1,
+});
+
+const mapUserCredential = (row: Record<string, unknown>): UserCredentialRow => ({
+  principal: row.principal as string,
+  upstreamId: row.upstream_id as string,
+  field: row.field as string,
+  secretRef: row.secret_ref as string,
+  updatedAt: row.updated_at as string,
 });

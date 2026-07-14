@@ -163,3 +163,38 @@ describe("loadConfig — KEY_VAULT_URI", () => {
     ).toThrow(/one ref scheme at a time/);
   });
 });
+
+describe("loadConfig — GATEWAY_MODE", () => {
+  const load = (env: Record<string, string>) => loadConfig([], env as NodeJS.ProcessEnv);
+  const integratedEnv = {
+    GATEWAY_MODE: "integrated",
+    KEY_VAULT_URI: "https://example-kv.vault.azure.net",
+    ENTRA_TENANT_ID: "tenant-guid",
+    OIDC_AUDIENCE: "api://gateway",
+  };
+
+  it("defaults to standalone", () => {
+    expect(load({}).mode).toBe("standalone");
+  });
+
+  it("rejects unknown modes", () => {
+    expect(() => load({ GATEWAY_MODE: "hybrid" })).toThrow(ConfigError);
+  });
+
+  it("integrated with Key Vault + OIDC starts", () => {
+    const config = load(integratedEnv);
+    expect(config.mode).toBe("integrated");
+    expect(config.keyVault).not.toBeNull();
+    expect(config.oidc).not.toBeNull();
+  });
+
+  it("integrated refuses to start without the platform Key Vault", () => {
+    const { KEY_VAULT_URI: _omit, ...env } = integratedEnv;
+    expect(() => load(env)).toThrow(/requires KEY_VAULT_URI/);
+  });
+
+  it("integrated refuses to start without OIDC (self-service needs real principals)", () => {
+    const env = { GATEWAY_MODE: "integrated", KEY_VAULT_URI: "https://example-kv.vault.azure.net" };
+    expect(() => load(env)).toThrow(/requires OIDC/);
+  });
+});

@@ -93,4 +93,31 @@ function migrate(db: DatabaseSync): void {
 
     db.exec("PRAGMA user_version = 1");
   }
+
+  if (version < 2) {
+    // Per-principal self-service (integrated-mode slice 3): personal narrowing
+    // prefs and registered upstream credentials. `principal` is the stable
+    // identity `${kind}:${subject}` — deliberately NOT the role-qualified
+    // session key, so prefs survive role changes.
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS user_prefs (
+        principal TEXT NOT NULL,
+        upstream_id TEXT NOT NULL,
+        tool_name TEXT NOT NULL DEFAULT '',
+        enabled INTEGER NOT NULL,
+        PRIMARY KEY (principal, upstream_id, tool_name)
+      );
+
+      CREATE TABLE IF NOT EXISTS user_credentials (
+        principal TEXT NOT NULL,
+        upstream_id TEXT NOT NULL,
+        field TEXT NOT NULL,
+        secret_ref TEXT NOT NULL,
+        updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY (principal, upstream_id, field)
+      );
+    `);
+
+    db.exec("PRAGMA user_version = 2");
+  }
 }

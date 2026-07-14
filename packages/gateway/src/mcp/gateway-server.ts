@@ -29,15 +29,17 @@ export function createGatewayServer(
     { capabilities: { tools: { listChanged: true } } }
   );
 
+  // Envelope ∧ personal prefs — the same allowsFor gates list AND call, so
+  // a user's own narrowing is enforced at the boundary, not just hidden in UX.
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: policy
-      .visibleEntries(principal.roleId, manager.catalogEntries())
+      .visibleEntriesFor(principal, manager.catalogEntries())
       .map((entry) => ({ ...entry.tool, name: entry.exposedName })),
   }));
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const entry = manager.entryFor(request.params.name);
-    if (!entry || !policy.allows(principal.roleId, entry)) {
+    if (!entry || !policy.allowsFor(principal, entry)) {
       // Same response for unknown and forbidden — no tool-existence oracle.
       return {
         isError: true,

@@ -45,6 +45,7 @@ docker compose -f docker/docker-compose.yml up -d
 | `ADMIN_BOOTSTRAP_SUBJECTS` | emails/subs that get admin on first OIDC login |
 | `BAO_ADDR` + `BAO_TOKEN` or `BAO_ROLE_ID`/`BAO_SECRET_ID` | OpenBao secret store (`bao:path#field` refs) |
 | `KEY_VAULT_URI` | Azure Key Vault secret store via `DefaultAzureCredential` (`kv:secret-name` refs; one store at a time) |
+| `GATEWAY_MODE` | `standalone` (default) or `integrated` — integrated (running as a native MSPStack app) requires `KEY_VAULT_URI` + OIDC |
 | `PORT`, `PUBLIC_URL`, `DB_PATH`, `ALLOWED_ORIGINS` | plumbing |
 | `DEV_ALLOW_UNAUTHENTICATED=true` | localhost-dev only; without any auth configured the gateway refuses to start |
 

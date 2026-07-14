@@ -58,6 +58,8 @@ const config: GatewayConfig = {
   adminBootstrapSubjects: [],
   devAllowUnauthenticated: false,
   bao: null,
+  keyVault: null,
+  mode: "standalone",
 };
 
 let httpServer: HttpServer;

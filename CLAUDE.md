@@ -14,7 +14,7 @@ Self-hosted MCP manager/gateway: one streamable-HTTP `/mcp` endpoint federating 
 - `config.ts` — flags/env + `mspstack.config.json` (`ConfigError`); parses `MCP_TOKENS_<ROLE>` lists, OIDC (`OIDC_ISSUER`/`ENTRA_TENANT_ID` + required `OIDC_AUDIENCE`), `BAO_*`
 - `db/` — `node:sqlite` schema (roles/upstreams/grants/tool_overrides/tool_settings/users/group_mappings, seeded viewer/editor/admin) + typed `Repo`
 - `domain/catalog.ts` — namespacing (`${namespace}_${tool}`, no double-prefix), routing map (no string-splitting), annotation-derived tiers (port of mcp-itglue `tierOf`)
-- `domain/policy.ts` — `PolicyService`: toolEnabled ∧ (override(allow) ∨ (tier ≤ maxTier ∧ ¬deny)); maxTier = per-upstream grant ?? role default. Same function gates tools/list AND tools/call
+- `domain/policy.ts` — `PolicyService`: toolEnabled ∧ (override(allow) ∨ (tier ≤ maxTier ∧ ¬deny)); maxTier = per-upstream grant ?? role default. Same function gates tools/list AND tools/call. `allowsFor(principal, entry)` = envelope ∧ personal prefs (deny-only rows in `user_prefs`; "enable" deletes the row — narrowing can never widen)
 - `auth/` — `static-tokens.ts` (timing-safe bearer match), `oidc.ts` (jose JWKS, issuer/aud/exp validation, groups claim), `prm.ts` (RFC 9728 doc + WWW-Authenticate), `principal.ts` (session binding key)
 - `secrets/` — `SecretStore` interface (scheme-tagged: `bao` | `kv`), `openbao.ts` (KV v2, AppRole or token, 5-min cache), `keyvault.ts` (Azure Key Vault, `DefaultAzureCredential`, lazy SDK import, same 5-min cache; `put(path, field)` writes `path-field`), `memory.ts` (tests). Refs: `bao:path#field` / `kv:secret-name`; env refs: `${VAR}` — all resolved only at upstream connect time. One store at a time (`BAO_ADDR` xor `KEY_VAULT_URI`)
 - `upstream/connection.ts` — one pooled SDK `Client` per upstream; header/env injection; backoff reconnect (1s→60s) + `onRecovered`; retry-once on dropped transport
@@ -22,6 +22,7 @@ Self-hosted MCP manager/gateway: one streamable-HTTP `/mcp` endpoint federating 
 - `mcp/gateway-server.ts` — low-level SDK `Server` per session, closes over the Principal; unknown and forbidden tools get the same error (no existence oracle)
 - `http/app.ts` — `/mcp` (origin check → resolveAuth → principal-bound sessions), PRM endpoints, per-session fingerprint-diffed `list_changed`, mounts `/api` + `/admin`
 - `http/admin-api.ts` — admin-only JSON API (upstream CRUD, preflight, registry search, catalog toggles, roles/grants/overrides, users, mappings, secret writes)
+- `http/me-api.ts` — `/api/me/*` for ANY principal (mounted before `/api`): effective access (envelope ∧ prefs), narrow-only prefs (404 outside the envelope), personal credential registration → secret store under `gw-user-<principalSlug>-<upstreamId>-<field>`, SQLite keeps only refs. Consumed by per-principal sessions later (`sessionMode`)
 - `public/admin.html` — dependency-free single-file admin UI (token sign-in)
 
 ## Security invariants
@@ -41,4 +42,4 @@ Self-hosted MCP manager/gateway: one streamable-HTTP `/mcp` endpoint federating 
 
 Admin UI OIDC login (cookie + PKCE via openid-client; today the UI signs in with an admin bearer token) · resources/prompts federation · per-principal upstream sessions (`sessionMode`) · CIMD client registration · npm pre-install pool.
 
-**MSPStack integrated mode** — the gateway becomes runnable as a native MSPStack app: `GATEWAY_MODE=standalone|integrated` (standalone stays exactly today's behavior — never a fork), an Azure Key Vault `SecretStore` (`kv:<name>` refs, ships first, useful to both modes), a user self-service API (`/api/me/*`: narrow-only tool/server prefs + registering personal upstream creds — this is what finally consumes `sessionMode`), admin surface driven from the MSPStack control plane. Design plan lives in the MSPStack repo (private, github.com/selic/MSPStack): `docs/plans/gateway-integrated-mode.md` — slices 1/3/5 land here, 2/4 land there.
+**MSPStack integrated mode** — the gateway runs as a native MSPStack app. SHIPPED: `secrets/keyvault.ts` (`kv:<name>` refs), `GATEWAY_MODE=standalone|integrated` (integrated demands KEY_VAULT_URI + OIDC; standalone is byte-for-byte the old behavior), `/api/me/*` self-service (narrow-only prefs enforced in PolicyService at list AND call; personal creds → secret store, refs only). REMAINING: `sessionMode` per-principal upstream sessions consuming those creds; Toolbox "My MCP Access" app lives in the MSPStack repo. Design plan: MSPStack repo (private, github.com/selic/MSPStack) `docs/plans/gateway-integrated-mode.md`.

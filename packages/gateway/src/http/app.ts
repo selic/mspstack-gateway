@@ -35,6 +35,7 @@ import { principalKey, type Principal } from "../auth/principal.js";
 import { PRM_PATH, prmDocument, wwwAuthenticate } from "../auth/prm.js";
 import { createGatewayServer, SERVER_NAME, SERVER_VERSION } from "../mcp/gateway-server.js";
 import { createAdminRouter } from "./admin-api.js";
+import { createMeRouter } from "./me-api.js";
 
 export interface AppDeps {
   config: GatewayConfig;
@@ -342,6 +343,15 @@ export function createApp(deps: AppDeps): express.Express {
 
   app.get("/mcp", handleSessionRequest);
   app.delete("/mcp", handleSessionRequest);
+
+  // ── User self-service API (any principal) ───────────────────
+  // Mounted BEFORE /api so the admin router's admin-only middleware never
+  // sees /api/me requests.
+
+  app.use(
+    "/api/me",
+    createMeRouter(deps, { resolveAuth, onPolicyChanged: broadcastVisibility })
+  );
 
   // ── Admin API + UI ───────────────────────────────────────────
 

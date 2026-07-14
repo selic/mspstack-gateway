@@ -15,6 +15,9 @@
  *   ADMIN_BOOTSTRAP_SUBJECTS         comma list of emails/subs granted admin on first OIDC login
  *   DEV_ALLOW_UNAUTHENTICATED=true   explicit localhost-dev escape hatch (admin role)
  *
+ *   GATEWAY_MODE                     standalone (default) | integrated — integrated
+ *                                    requires KEY_VAULT_URI + OIDC (refuses to start otherwise)
+ *
  * Secrets (one store at a time, optional):
  *   BAO_ADDR, BAO_MOUNT (default "mspstack"), BAO_TOKEN or BAO_ROLE_ID+BAO_SECRET_ID
  *     — OpenBao / Vault KV v2, enables "bao:path#field" refs
@@ -93,7 +96,17 @@ export interface KeyVaultConfig {
   vaultUrl: string;
 }
 
+export type GatewayMode = "standalone" | "integrated";
+
 export interface GatewayConfig {
+  /**
+   * standalone (default) — today's behavior, byte for byte.
+   * integrated — running as a native MSPStack app: requires the platform
+   * Key Vault (KEY_VAULT_URI) and OIDC (Entra) so user self-service has a
+   * real principal and a real secret store. Same "no silent misconfig"
+   * posture as auth: refuse to start rather than run half-integrated.
+   */
+  mode: GatewayMode;
   port: number;
   publicUrl: string;
   configPath: string;
@@ -298,6 +311,13 @@ export function loadConfig(
     };
   }
 
+  // ── mode ──
+  const modeRaw = cleanEnv(env.GATEWAY_MODE) ?? "standalone";
+  if (modeRaw !== "standalone" && modeRaw !== "integrated") {
+    throw new ConfigError(`GATEWAY_MODE must be "standalone" or "integrated", got "${modeRaw}"`);
+  }
+  const mode: GatewayMode = modeRaw;
+
   // ── Azure Key Vault ──
   const keyVaultUri = cleanEnv(env.KEY_VAULT_URI);
   let keyVault: KeyVaultConfig | null = null;
@@ -313,7 +333,19 @@ export function loadConfig(
     keyVault = { vaultUrl: keyVaultUri.replace(/\/+$/, "") };
   }
 
+  if (mode === "integrated") {
+    if (!keyVault) {
+      throw new ConfigError("GATEWAY_MODE=integrated requires KEY_VAULT_URI (the platform Key Vault)");
+    }
+    if (!oidc) {
+      throw new ConfigError(
+        "GATEWAY_MODE=integrated requires OIDC (ENTRA_TENANT_ID/OIDC_ISSUER + OIDC_AUDIENCE) — user self-service needs real principals"
+      );
+    }
+  }
+
   return {
+    mode,
     port,
     publicUrl,
     configPath,
