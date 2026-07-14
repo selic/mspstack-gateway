@@ -79,7 +79,9 @@ Part of **MSPStack** — a family of MCP tooling for MSPs: [mcp-itglue](https://
 
 ## Roadmap
 
-Admin-UI OIDC login (today the UI signs in with an admin token) · resources/prompts federation · per-user upstream sessions · CIMD client registration · MSPStack integrated mode (Key Vault secret store, user self-service creds/prefs, Toolbox publication — designed in the MSPStack repo, `docs/plans/gateway-integrated-mode.md`).
+Admin-UI OIDC login (today the UI signs in with an admin token) · resources/prompts federation · CIMD client registration.
+
+Shipped from the MSPStack integrated-mode plan (`docs/plans/gateway-integrated-mode.md` in the MSPStack repo): Azure Key Vault secret store (`kv:` refs), `GATEWAY_MODE`, `/api/me` self-service (narrow-only tool prefs + personal upstream credentials), and `sessionMode: "per-user"` — per-principal upstream sessions running each caller's calls over their own registered credentials (PSA write attribution).
 
 ## Author
 

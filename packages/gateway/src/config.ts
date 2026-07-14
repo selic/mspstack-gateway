@@ -42,6 +42,15 @@ const upstreamBase = {
     .string()
     .regex(NAMESPACE_RE, "namespace must match [a-z0-9]+ (no underscores)"),
   enabled: z.boolean().default(true),
+  /**
+   * shared (default) — one pooled connection with the spec's credentials.
+   * per-user — calls run over a per-principal connection whose header/env
+   * values are overridden by the caller's registered credentials
+   * (/api/me/credentials); catalog discovery still uses the shared link.
+   */
+  sessionMode: z.enum(["shared", "per-user"]).default("shared"),
+  /** per-user only: refuse shared-credential fallback for callers without personal creds. */
+  requirePersonalCredentials: z.boolean().default(false),
 };
 
 const httpUpstreamSchema = z.object({

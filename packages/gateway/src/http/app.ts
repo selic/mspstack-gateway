@@ -31,7 +31,7 @@ import type { UpstreamManager } from "../upstream/manager.js";
 import type { SecretStore } from "../secrets/store.js";
 import type { OidcVerifier } from "../auth/oidc.js";
 import { authenticateStaticToken, bearerToken } from "../auth/static-tokens.js";
-import { principalKey, type Principal } from "../auth/principal.js";
+import { prefsIdentity, principalKey, type Principal } from "../auth/principal.js";
 import { PRM_PATH, prmDocument, wwwAuthenticate } from "../auth/prm.js";
 import { createGatewayServer, SERVER_NAME, SERVER_VERSION } from "../mcp/gateway-server.js";
 import { createAdminRouter } from "./admin-api.js";
@@ -294,7 +294,15 @@ export function createApp(deps: AppDeps): express.Express {
         return rpcError(res, 400, -32600, "Bad request: expected an initialize request");
       }
 
-      const server = createGatewayServer(manager, policy, auth.principal);
+      const principal = auth.principal;
+      const server = createGatewayServer(manager, policy, principal, (upstreamId) =>
+        Object.fromEntries(
+          deps.repo
+            .listUserCredentials(prefsIdentity(principal))
+            .filter((row) => row.upstreamId === upstreamId)
+            .map((row) => [row.field, row.secretRef])
+        )
+      );
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
         onsessioninitialized: (newSessionId) => {
