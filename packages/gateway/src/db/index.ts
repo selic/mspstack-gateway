@@ -148,4 +148,29 @@ function migrate(db: DatabaseSync): void {
 
     db.exec("PRAGMA user_version = 3");
   }
+
+  if (version < 4) {
+    // Rotating refresh tokens for the OAuth AS facade (phase 2). Stored
+    // HASHED like authorization codes. family_id groups a rotation chain so
+    // replay of an already-rotated token can revoke the whole family in one
+    // statement (OAuth 2.1 reuse detection); rotated_from records lineage.
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS oauth_refresh_tokens (
+        token_hash TEXT PRIMARY KEY,
+        client_id TEXT NOT NULL,
+        principal_iss TEXT NOT NULL,
+        principal_sub TEXT NOT NULL,
+        family_id TEXT NOT NULL,
+        rotated_from TEXT,
+        expires_at INTEGER NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+        rotated_at TEXT,
+        revoked_at TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_oauth_refresh_family ON oauth_refresh_tokens (family_id);
+      CREATE INDEX IF NOT EXISTS idx_oauth_refresh_client ON oauth_refresh_tokens (client_id);
+    `);
+
+    db.exec("PRAGMA user_version = 4");
+  }
 }

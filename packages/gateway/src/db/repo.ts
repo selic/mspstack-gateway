@@ -73,6 +73,27 @@ export interface OauthCodeRow {
   usedAt: string | null;
 }
 
+export interface OauthRefreshTokenRow {
+  tokenHash: string;
+  clientId: string;
+  principalIss: string;
+  principalSub: string;
+  /** Rotation-chain id (the root token's hash) — one revocation hits the chain. */
+  familyId: string;
+  rotatedFrom: string | null;
+  /** unix epoch millis */
+  expiresAt: number;
+  createdAt: string;
+  rotatedAt: string | null;
+  revokedAt: string | null;
+}
+
+export type RefreshConsumeResult =
+  | { status: "ok"; row: OauthRefreshTokenRow }
+  /** The token existed but was already rotated/revoked — replay; revoke the family. */
+  | { status: "reuse"; familyId: string }
+  | { status: "invalid" };
+
 export interface UserCredentialRow {
   principal: string;
   upstreamId: string;
@@ -517,6 +538,86 @@ export class Repo {
     return row ? mapOauthCode(row) : null;
   }
 
+  listOauthClients(): OauthClientRow[] {
+    return (
+      this.db
+        .prepare("SELECT client_id, client_name, redirect_uris_json, created_at FROM oauth_clients ORDER BY created_at DESC, client_id")
+        .all() as Array<Record<string, unknown>>
+    ).map(mapOauthClient);
+  }
+
+  /** Remove a registered client and everything minted for it (codes + refresh tokens). */
+  deleteOauthClient(clientId: string): boolean {
+    this.db.prepare("DELETE FROM oauth_codes WHERE client_id = ?").run(clientId);
+    this.db.prepare("DELETE FROM oauth_refresh_tokens WHERE client_id = ?").run(clientId);
+    return this.db.prepare("DELETE FROM oauth_clients WHERE client_id = ?").run(clientId).changes > 0;
+  }
+
+  // ── OAuth refresh tokens (rotating; phase 2) ──
+
+  insertOauthRefreshToken(token: {
+    tokenHash: string;
+    clientId: string;
+    principalIss: string;
+    principalSub: string;
+    familyId: string;
+    rotatedFrom: string | null;
+    expiresAt: number;
+  }): void {
+    this.db.prepare("DELETE FROM oauth_refresh_tokens WHERE expires_at < ?").run(Date.now());
+    this.db
+      .prepare(
+        `INSERT INTO oauth_refresh_tokens
+           (token_hash, client_id, principal_iss, principal_sub, family_id, rotated_from, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        token.tokenHash,
+        token.clientId,
+        token.principalIss,
+        token.principalSub,
+        token.familyId,
+        token.rotatedFrom,
+        token.expiresAt
+      );
+  }
+
+  /**
+   * Rotation step: atomically mark the token rotated and return it, but only
+   * if it is live (unrotated, unrevoked, unexpired) AND belongs to clientId —
+   * the client check happens BEFORE consumption so a wrong-client request
+   * cannot burn a legitimate token. A live-miss is then classified: an
+   * existing rotated/revoked row for the same client is a REPLAY (the caller
+   * must revoke the family); anything else is plain invalid.
+   */
+  consumeOauthRefreshToken(tokenHash: string, clientId: string): RefreshConsumeResult {
+    const row = this.db
+      .prepare(
+        `UPDATE oauth_refresh_tokens SET rotated_at = datetime('now')
+         WHERE token_hash = ? AND client_id = ? AND rotated_at IS NULL AND revoked_at IS NULL AND expires_at >= ?
+         RETURNING token_hash, client_id, principal_iss, principal_sub, family_id, rotated_from,
+                   expires_at, created_at, rotated_at, revoked_at`
+      )
+      .get(tokenHash, clientId, Date.now()) as Record<string, unknown> | undefined;
+    if (row) return { status: "ok", row: mapOauthRefreshToken(row) };
+
+    const stale = this.db
+      .prepare(
+        `SELECT family_id FROM oauth_refresh_tokens
+         WHERE token_hash = ? AND client_id = ? AND (rotated_at IS NOT NULL OR revoked_at IS NOT NULL)`
+      )
+      .get(tokenHash, clientId) as { family_id: string } | undefined;
+    if (stale) return { status: "reuse", familyId: stale.family_id };
+    return { status: "invalid" };
+  }
+
+  /** Reuse detected (or admin action): kill every live token in the chain. */
+  revokeOauthRefreshFamily(familyId: string): number {
+    return this.db
+      .prepare("UPDATE oauth_refresh_tokens SET revoked_at = datetime('now') WHERE family_id = ? AND revoked_at IS NULL")
+      .run(familyId).changes;
+  }
+
   deleteUserCredential(principal: string, upstreamId: string, field: string): boolean {
     const result = this.db
       .prepare(
@@ -576,6 +677,19 @@ const mapOauthCode = (row: Record<string, unknown>): OauthCodeRow => ({
   resource: (row.resource as string | null) ?? null,
   expiresAt: row.expires_at as number,
   usedAt: (row.used_at as string | null) ?? null,
+});
+
+const mapOauthRefreshToken = (row: Record<string, unknown>): OauthRefreshTokenRow => ({
+  tokenHash: row.token_hash as string,
+  clientId: row.client_id as string,
+  principalIss: row.principal_iss as string,
+  principalSub: row.principal_sub as string,
+  familyId: row.family_id as string,
+  rotatedFrom: (row.rotated_from as string | null) ?? null,
+  expiresAt: row.expires_at as number,
+  createdAt: row.created_at as string,
+  rotatedAt: (row.rotated_at as string | null) ?? null,
+  revokedAt: (row.revoked_at as string | null) ?? null,
 });
 
 const mapUserCredential = (row: Record<string, unknown>): UserCredentialRow => ({

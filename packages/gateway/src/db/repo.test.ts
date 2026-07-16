@@ -125,6 +125,55 @@ describe("Repo", () => {
     expect(repo.consumeOauthCode("h3")).toBeNull();
   });
 
+  it("lists and deletes OAuth clients with their codes and refresh tokens", () => {
+    const repo = fresh();
+    repo.createOauthClient({ clientId: "c1", clientName: "One", redirectUris: ["https://a/cb"] });
+    repo.createOauthClient({ clientId: "c2", clientName: "Two", redirectUris: ["https://b/cb"] });
+    repo.insertOauthCode({
+      codeHash: "code1", clientId: "c1", principalIss: "https://idp", principalSub: "u1",
+      codeChallenge: "ch", resource: null, expiresAt: Date.now() + 60_000,
+    });
+    repo.insertOauthRefreshToken({
+      tokenHash: "rt1", clientId: "c1", principalIss: "https://idp", principalSub: "u1",
+      familyId: "rt1", rotatedFrom: null, expiresAt: Date.now() + 60_000,
+    });
+
+    expect(repo.listOauthClients().map((c) => c.clientId).sort()).toEqual(["c1", "c2"]);
+    expect(repo.deleteOauthClient("c1")).toBe(true);
+    expect(repo.deleteOauthClient("c1")).toBe(false); // gone
+    expect(repo.listOauthClients().map((c) => c.clientId)).toEqual(["c2"]);
+    expect(repo.consumeOauthCode("code1")).toBeNull(); // cascaded
+    expect(repo.consumeOauthRefreshToken("rt1", "c1").status).toBe("invalid"); // cascaded
+  });
+
+  it("refresh tokens rotate once; replay is classified as reuse; family revocation kills the chain", () => {
+    const repo = fresh();
+    const base = { clientId: "c1", principalIss: "https://idp", principalSub: "u1", familyId: "root" };
+    repo.insertOauthRefreshToken({ ...base, tokenHash: "root", rotatedFrom: null, expiresAt: Date.now() + 60_000 });
+
+    // wrong client must NOT burn the token
+    expect(repo.consumeOauthRefreshToken("root", "other").status).toBe("invalid");
+
+    const first = repo.consumeOauthRefreshToken("root", "c1");
+    expect(first.status).toBe("ok");
+    if (first.status === "ok") expect(first.row.principalSub).toBe("u1");
+
+    // successor in the same family
+    repo.insertOauthRefreshToken({ ...base, tokenHash: "gen2", rotatedFrom: "root", expiresAt: Date.now() + 60_000 });
+
+    // replaying the rotated root → reuse signal with the family id
+    const replay = repo.consumeOauthRefreshToken("root", "c1");
+    expect(replay).toEqual({ status: "reuse", familyId: "root" });
+
+    // revoking the family kills the live successor (and stamps the rotated root)
+    expect(repo.revokeOauthRefreshFamily("root")).toBe(2);
+    expect(repo.consumeOauthRefreshToken("gen2", "c1").status).toBe("reuse");
+
+    // expired tokens are plain invalid
+    repo.insertOauthRefreshToken({ ...base, tokenHash: "old", rotatedFrom: null, expiresAt: Date.now() - 1 });
+    expect(repo.consumeOauthRefreshToken("old", "c1").status).toBe("invalid");
+  });
+
   it("inserting a code sweeps expired ones", () => {
     const repo = fresh();
     const base = {
