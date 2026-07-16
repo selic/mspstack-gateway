@@ -120,4 +120,32 @@ function migrate(db: DatabaseSync): void {
 
     db.exec("PRAGMA user_version = 2");
   }
+
+  if (version < 3) {
+    // OAuth Authorization Server facade (DCR): dynamically registered MCP
+    // clients and single-use authorization codes. Codes are stored HASHED
+    // (sha256 hex) — the plaintext never touches the database. expires_at is
+    // unix epoch millis for cheap comparison.
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS oauth_clients (
+        client_id TEXT PRIMARY KEY,
+        client_name TEXT,
+        redirect_uris_json TEXT NOT NULL,
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+
+      CREATE TABLE IF NOT EXISTS oauth_codes (
+        code_hash TEXT PRIMARY KEY,
+        client_id TEXT NOT NULL,
+        principal_iss TEXT NOT NULL,
+        principal_sub TEXT NOT NULL,
+        code_challenge TEXT NOT NULL,
+        resource TEXT,
+        expires_at INTEGER NOT NULL,
+        used_at TEXT
+      );
+    `);
+
+    db.exec("PRAGMA user_version = 3");
+  }
 }
