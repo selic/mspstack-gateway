@@ -87,4 +87,57 @@ describe("Repo", () => {
     repo.setUserRole(user.id, admin.id);
     expect(repo.resolveOidcRole("https://idp", "u1", ["g1"])?.name).toBe("admin");
   });
+
+  it("stores and reads back OAuth clients", () => {
+    const repo = fresh();
+    repo.createOauthClient({
+      clientId: "c1",
+      clientName: "Claude",
+      redirectUris: ["http://127.0.0.1:9000/cb", "https://client.example/cb"],
+    });
+    const client = repo.oauthClient("c1")!;
+    expect(client.clientName).toBe("Claude");
+    expect(client.redirectUris).toEqual(["http://127.0.0.1:9000/cb", "https://client.example/cb"]);
+    expect(repo.oauthClient("nope")).toBeNull();
+  });
+
+  it("OAuth codes are single-use and expire", () => {
+    const repo = fresh();
+    const base = {
+      clientId: "c1",
+      principalIss: "https://idp",
+      principalSub: "u1",
+      codeChallenge: "chal",
+      resource: "https://gw/mcp",
+    };
+    repo.insertOauthCode({ ...base, codeHash: "h1", expiresAt: Date.now() + 60_000 });
+
+    const first = repo.consumeOauthCode("h1");
+    expect(first?.principalSub).toBe("u1");
+    expect(first?.usedAt).not.toBeNull();
+    // replay → rejected
+    expect(repo.consumeOauthCode("h1")).toBeNull();
+    // unknown → rejected
+    expect(repo.consumeOauthCode("h2")).toBeNull();
+
+    // expired → rejected
+    repo.insertOauthCode({ ...base, codeHash: "h3", expiresAt: Date.now() - 1 });
+    expect(repo.consumeOauthCode("h3")).toBeNull();
+  });
+
+  it("inserting a code sweeps expired ones", () => {
+    const repo = fresh();
+    const base = {
+      clientId: "c1",
+      principalIss: "https://idp",
+      principalSub: "u1",
+      codeChallenge: "chal",
+      resource: null,
+    };
+    repo.insertOauthCode({ ...base, codeHash: "old", expiresAt: Date.now() - 1 });
+    repo.insertOauthCode({ ...base, codeHash: "new", expiresAt: Date.now() + 60_000 });
+    // the sweep removed "old" entirely (not just unredeemable)
+    expect(repo.consumeOauthCode("old")).toBeNull();
+    expect(repo.consumeOauthCode("new")).not.toBeNull();
+  });
 });

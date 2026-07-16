@@ -54,6 +54,25 @@ export interface UserPrefRow {
   enabled: boolean;
 }
 
+export interface OauthClientRow {
+  clientId: string;
+  clientName: string | null;
+  redirectUris: string[];
+  createdAt: string;
+}
+
+export interface OauthCodeRow {
+  codeHash: string;
+  clientId: string;
+  principalIss: string;
+  principalSub: string;
+  codeChallenge: string;
+  resource: string | null;
+  /** unix epoch millis */
+  expiresAt: number;
+  usedAt: string | null;
+}
+
 export interface UserCredentialRow {
   principal: string;
   upstreamId: string;
@@ -436,6 +455,68 @@ export class Repo {
       .run(principal, upstreamId, field, secretRef);
   }
 
+  // ── OAuth AS facade (DCR clients + single-use authorization codes) ──
+
+  createOauthClient(client: { clientId: string; clientName: string | null; redirectUris: string[] }): void {
+    this.db
+      .prepare("INSERT INTO oauth_clients (client_id, client_name, redirect_uris_json) VALUES (?, ?, ?)")
+      .run(client.clientId, client.clientName, JSON.stringify(client.redirectUris));
+  }
+
+  oauthClient(clientId: string): OauthClientRow | null {
+    const row = this.db
+      .prepare("SELECT client_id, client_name, redirect_uris_json, created_at FROM oauth_clients WHERE client_id = ?")
+      .get(clientId) as Record<string, unknown> | undefined;
+    return row ? mapOauthClient(row) : null;
+  }
+
+  /**
+   * Persist a new authorization code by its HASH (plaintext codes never touch
+   * the DB) and opportunistically sweep codes past their TTL.
+   */
+  insertOauthCode(code: {
+    codeHash: string;
+    clientId: string;
+    principalIss: string;
+    principalSub: string;
+    codeChallenge: string;
+    resource: string | null;
+    expiresAt: number;
+  }): void {
+    this.db.prepare("DELETE FROM oauth_codes WHERE expires_at < ?").run(Date.now());
+    this.db
+      .prepare(
+        `INSERT INTO oauth_codes
+           (code_hash, client_id, principal_iss, principal_sub, code_challenge, resource, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`
+      )
+      .run(
+        code.codeHash,
+        code.clientId,
+        code.principalIss,
+        code.principalSub,
+        code.codeChallenge,
+        code.resource,
+        code.expiresAt
+      );
+  }
+
+  /**
+   * Single-use redemption: atomically marks the code used and returns it only
+   * if it existed, was unused, and is unexpired. A replay (or an expired /
+   * unknown code) returns null.
+   */
+  consumeOauthCode(codeHash: string): OauthCodeRow | null {
+    const row = this.db
+      .prepare(
+        `UPDATE oauth_codes SET used_at = datetime('now')
+         WHERE code_hash = ? AND used_at IS NULL AND expires_at >= ?
+         RETURNING code_hash, client_id, principal_iss, principal_sub, code_challenge, resource, expires_at, used_at`
+      )
+      .get(codeHash, Date.now()) as Record<string, unknown> | undefined;
+    return row ? mapOauthCode(row) : null;
+  }
+
   deleteUserCredential(principal: string, upstreamId: string, field: string): boolean {
     const result = this.db
       .prepare(
@@ -477,6 +558,24 @@ const mapUserPref = (row: Record<string, unknown>): UserPrefRow => ({
   upstreamId: row.upstream_id as string,
   toolName: row.tool_name as string,
   enabled: row.enabled === 1,
+});
+
+const mapOauthClient = (row: Record<string, unknown>): OauthClientRow => ({
+  clientId: row.client_id as string,
+  clientName: (row.client_name as string | null) ?? null,
+  redirectUris: JSON.parse(row.redirect_uris_json as string) as string[],
+  createdAt: row.created_at as string,
+});
+
+const mapOauthCode = (row: Record<string, unknown>): OauthCodeRow => ({
+  codeHash: row.code_hash as string,
+  clientId: row.client_id as string,
+  principalIss: row.principal_iss as string,
+  principalSub: row.principal_sub as string,
+  codeChallenge: row.code_challenge as string,
+  resource: (row.resource as string | null) ?? null,
+  expiresAt: row.expires_at as number,
+  usedAt: (row.used_at as string | null) ?? null,
 });
 
 const mapUserCredential = (row: Record<string, unknown>): UserCredentialRow => ({
