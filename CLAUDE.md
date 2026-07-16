@@ -15,7 +15,7 @@ Self-hosted MCP manager/gateway: one streamable-HTTP `/mcp` endpoint federating 
 - `db/` — `node:sqlite` schema (roles/upstreams/grants/tool_overrides/tool_settings/users/group_mappings, seeded viewer/editor/admin) + typed `Repo`
 - `domain/catalog.ts` — namespacing (`${namespace}_${tool}`, no double-prefix), routing map (no string-splitting), annotation-derived tiers (port of mcp-itglue `tierOf`)
 - `domain/policy.ts` — `PolicyService`: toolEnabled ∧ (override(allow) ∨ (tier ≤ maxTier ∧ ¬deny)); maxTier = per-upstream grant ?? role default. Same function gates tools/list AND tools/call. `allowsFor(principal, entry)` = envelope ∧ personal prefs (deny-only rows in `user_prefs`; "enable" deletes the row — narrowing can never widen)
-- `auth/` — `static-tokens.ts` (timing-safe bearer match), `oidc.ts` (jose JWKS resource-server verifier for inbound *access* tokens), `login.ts` (interactive login: openid-client cookie+PKCE confidential-client flow consuming an *id-token*; signed identity-only session cookie, HMAC + freshness; `safeReturnTo`), `prm.ts` (RFC 9728 doc + WWW-Authenticate), `principal.ts` (session binding key). Three inbound auth paths in `createAuthResolver`: static token, OIDC bearer, and the cookie session — the cookie carries only `{iss,sub}` and the role is re-resolved every request (persisted at callback via `setUserRole`), so a session id never carries privilege. `loginUpsert()` is shared by the bearer + callback paths so they can't drift.
+- `auth/` — `static-tokens.ts` (timing-safe bearer match), `oidc.ts` (jose JWKS resource-server verifier for inbound *access* tokens), `login.ts` (interactive login: openid-client cookie+PKCE confidential-client flow consuming an *id-token*; signed identity-only session cookie, HMAC + freshness; `safeReturnTo`), `authz-server.ts` (OAuth AS facade: RFC 8414 metadata, RFC 7591 DCR for public clients, single-use hashed 60s codes + PKCE S256, HS256 gateway JWTs keyed by `GATEWAY_JWT_SECRET` (default derived from `SESSION_SECRET`), register rate limit), `prm.ts` (RFC 9728 doc + WWW-Authenticate; lists the gateway itself as AS when login is configured, else the raw IdP), `principal.ts` (session binding key). Four inbound auth paths in `createAuthResolver`: static token, gateway-issued JWT (routed by unverified `iss == PUBLIC_URL`, then fully verified), OIDC bearer, and the cookie session — the cookie/JWT carry only identity and the role is re-resolved every request (persisted at callback via `setUserRole`), so a session id never carries privilege. `loginUpsert()` is shared by the bearer + callback paths so they can't drift. `/oauth/authorize` brokers user auth to Entra by piggybacking the interactive login: the pending request rides in the signed transient cookie and `/auth/callback` mints the code.
 - `secrets/` — `SecretStore` interface (scheme-tagged: `bao` | `kv`), `openbao.ts` (KV v2, AppRole or token, 5-min cache), `keyvault.ts` (Azure Key Vault, `DefaultAzureCredential`, lazy SDK import, same 5-min cache; `put(path, field)` writes `path-field`), `memory.ts` (tests). Refs: `bao:path#field` / `kv:secret-name`; env refs: `${VAR}` — all resolved only at upstream connect time. One store at a time (`BAO_ADDR` xor `KEY_VAULT_URI`)
 - `upstream/connection.ts` — one pooled SDK `Client` per upstream; header/env injection; backoff reconnect (1s→60s) + `onRecovered`; retry-once on dropped transport
 - `upstream/manager.ts` also pools **per-principal links** for `sessionMode:"per-user"` upstreams: spec clone with the caller's credential REFS layered over headers/env (still resolved via the secret store at connect — anti-passthrough intact); catalog discovery stays on the shared link; personal pool flushed on upstream upsert/remove. `requirePersonalCredentials` refuses the shared fallback
@@ -42,11 +42,12 @@ Self-hosted MCP manager/gateway: one streamable-HTTP `/mcp` endpoint federating 
 
 ## Roadmap (post-v1)
 
-**NEXT UP — OAuth Authorization Server facade (DCR):** standard MCP clients
-(`claude mcp add <url>`) currently FAIL to connect in OAuth mode — Entra has no
-dynamic client registration and the gateway hosts no authorization server of its
-own (verified against prod 2026-07-16). Full self-contained plan:
-`docs/plans/oauth-authorization-server.md`. CIMD follows after DCR ships.
+**OAuth Authorization Server facade (DCR) — SHIPPED** (plan:
+`docs/plans/oauth-authorization-server.md`): the gateway hosts RFC 8414
+metadata + RFC 7591 DCR + `/oauth/authorize|token`, brokering user auth to
+Entra, so `claude mcp add <url>` connects with zero pre-provisioned client
+config. Remaining phases: refresh-token grant (phase 2), CIMD `https://`
+client ids (phase 3).
 
 Also: resources/prompts federation · npm pre-install pool.
 

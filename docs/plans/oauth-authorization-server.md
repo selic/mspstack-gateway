@@ -1,7 +1,10 @@
 # OAuth Authorization Server facade (DCR) — make the gateway connectable by standard MCP clients
 
-> **Status: PLANNED — not started.** This document is self-contained: a fresh session
-> in this repo can execute it without prior conversation context.
+> **Status: IMPLEMENTED (phase 1, 2026-07-16)** — commits 1–5 of §4 are done:
+> DCR + authorize/token + gateway JWTs + resolver/PRM wiring + docs. Phase 2
+> (refresh tokens) and phase 3 (CIMD) remain. This document is self-contained:
+> a fresh session in this repo can execute the remaining phases without prior
+> conversation context.
 
 ## 1. Problem — verified in production 2026-07-16
 

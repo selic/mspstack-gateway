@@ -8,6 +8,7 @@ Point Claude (Code, Desktop, or any MCP client) at a single URL; the gateway con
 
 - **One endpoint, many servers** — aggregates HTTP and stdio MCP servers with namespaced tools (`itglue_*`, `cw_*`, …) and live `tools/list_changed` propagation
 - **OAuth 2.1 + static tokens** — resource-server auth per the MCP spec (Entra ID or any OIDC provider; RFC 9728 discovery, audience-bound tokens) plus `MCP_TOKENS_<ROLE>` bearer tokens for non-OAuth clients
+- **Zero-config client connect (DCR)** — the gateway hosts its own OAuth authorization server facade (RFC 8414 metadata + RFC 7591 dynamic client registration), brokering user sign-in to your IdP; `claude mcp add <url>` connects with no pre-provisioned client id — URL only
 - **Roles & policy** — viewer/editor/admin (plus custom roles) gate tools by annotation-derived tiers (read/write/destructive), with per-upstream grants and per-tool allow/deny overrides; enforcement is re-checked at call time
 - **Secrets stay server-side** — upstream API keys live in OpenBao (`bao:path#field` refs) or env vars, injected at connect time; the inbound client token is never passed through to upstreams
 - **Install from the UI** — add MCP servers by URL, npm package (npx), or Docker image; search the official MCP registry; preflight-test before saving; crashed stdio servers restart with backoff
@@ -46,7 +47,8 @@ docker compose -f docker/docker-compose.yml up -d
 | `BAO_ADDR` + `BAO_TOKEN` or `BAO_ROLE_ID`/`BAO_SECRET_ID` | OpenBao secret store (`bao:path#field` refs) |
 | `KEY_VAULT_URI` | Azure Key Vault secret store via `DefaultAzureCredential` (`kv:secret-name` refs; one store at a time) |
 | `GATEWAY_MODE` | `standalone` (default) or `integrated` — integrated (running as a native MSPStack app) requires `KEY_VAULT_URI` + OIDC |
-| `AUTH_CLIENT_ID` / `AUTH_CLIENT_SECRET` / `AUTH_REDIRECT_URI` / `SESSION_SECRET` | interactive login (cookie + PKCE) — the gateway signs users into its own admin/user UI as a confidential OIDC client; without these the UI stays token-paste only |
+| `AUTH_CLIENT_ID` / `AUTH_CLIENT_SECRET` / `AUTH_REDIRECT_URI` / `SESSION_SECRET` | interactive login (cookie + PKCE) — the gateway signs users into its own admin/user UI as a confidential OIDC client; also enables the OAuth AS facade (DCR) for standard MCP clients; without these the UI stays token-paste only |
+| `GATEWAY_JWT_SECRET` | HS256 key for gateway-issued access tokens (AS facade); optional — defaults to a key derived from `SESSION_SECRET` |
 | `PORT`, `PUBLIC_URL`, `DB_PATH`, `ALLOWED_ORIGINS` | plumbing |
 | `DEV_ALLOW_UNAUTHENTICATED=true` | localhost-dev only; without any auth configured the gateway refuses to start |
 
@@ -71,6 +73,7 @@ Upstreams are managed in the admin UI (stored in SQLite) and/or declared in `msp
 ## Security model
 
 - The gateway is an **OAuth 2.1 resource server** (MCP authorization spec 2025-11-25): RFC 9728 metadata at `/.well-known/oauth-protected-resource`, `WWW-Authenticate` discovery on 401, and strict audience validation — tokens minted for other resources are rejected.
+- With interactive login configured it is also an **authorization server facade** for MCP clients (IdPs like Entra have no anonymous DCR): RFC 7591 registration (public clients, PKCE S256 mandatory, exact `redirect_uri` match, loopback-http/https only, rate-limited), single-use 60-second authorization codes stored hashed, and short-lived HS256 access tokens that carry **identity only** — the role is re-resolved from the database on every request. User authentication is brokered to your IdP; the gateway never sees passwords.
 - **Anti-passthrough:** inbound client tokens are used only to resolve identity; upstream credentials come exclusively from the secret store / env and are injected server-side.
 - Tool authorization is two-layer: `tools/list` filtering is UX; the call-time policy check is the boundary. Sessions are principal-bound — a session id alone grants nothing.
 
@@ -80,7 +83,7 @@ Part of **MSPStack** — a family of MCP tooling for MSPs: [mcp-itglue](https://
 
 ## Roadmap
 
-Admin-UI OIDC login (today the UI signs in with an admin token) · resources/prompts federation · CIMD client registration.
+Refresh-token grant for the AS facade · CIMD client registration (`https://` client ids) · resources/prompts federation · npm pre-install pool.
 
 Shipped from the MSPStack integrated-mode plan (`docs/plans/gateway-integrated-mode.md` in the MSPStack repo): Azure Key Vault secret store (`kv:` refs), `GATEWAY_MODE`, `/api/me` self-service (narrow-only tool prefs + personal upstream credentials), and `sessionMode: "per-user"` — per-principal upstream sessions running each caller's calls over their own registered credentials (PSA write attribution).
 
