@@ -79,6 +79,7 @@ beforeAll(async () => {
     oidcVerifier: null,
     loginService: fakeLogin,
     adminUiDir: null,
+    oauthRegisterLimit: { limit: 1000, windowMs: 60_000 },
   });
   httpServer = app.listen(0);
   base = `http://localhost:${(httpServer.address() as AddressInfo).port}`;
@@ -157,10 +158,11 @@ describe("OAuth AS facade — happy path", () => {
       expect(meta.issuer).toBe(PUBLIC_URL);
       expect(meta.registration_endpoint).toBe(`${PUBLIC_URL}/oauth/register`);
       expect(meta.code_challenge_methods_supported).toEqual(["S256"]);
+      expect(meta.grant_types_supported).toEqual(["authorization_code", "refresh_token"]);
     }
   });
 
-  it("DCR → authorize → callback → token yields a verifiable gateway JWT", async () => {
+  it("DCR → authorize → callback → token yields a verifiable gateway JWT + refresh token", async () => {
     const clientId = await register();
     const verifier = "verifier-verifier-verifier-verifier-43chars!";
     const { code, state } = await authorizeAndCallback(clientId, pkce(verifier));
@@ -169,6 +171,7 @@ describe("OAuth AS facade — happy path", () => {
     const { status, body } = await exchangeToken(clientId, code, verifier);
     expect(status).toBe(200);
     expect(body.token_type).toBe("Bearer");
+    expect(typeof body.refresh_token).toBe("string");
     const claims = await verifyAccessToken(body.access_token as string, PUBLIC_URL, JWT_SECRET);
     expect(claims).toEqual({ iss: ENTRA_ISS, sub: ENTRA_SUB });
 
@@ -271,6 +274,47 @@ describe("OAuth AS facade — security invariants", () => {
     });
     expect(response.status).toBe(400);
     expect(((await response.json()) as { error: string }).error).toBe("unsupported_grant_type");
+  });
+});
+
+describe("refresh_token grant", () => {
+  const refreshExchange = async (clientId: string, refreshToken: string) => {
+    const response = await fetch(`${base}/oauth/token`, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ grant_type: "refresh_token", refresh_token: refreshToken, client_id: clientId }),
+    });
+    return { status: response.status, body: (await response.json()) as Record<string, unknown> };
+  };
+
+  it("refreshes the access token and rotates the refresh token", async () => {
+    const clientId = await register();
+    const verifier = "refresh-flow-verifier-refresh-flow-43chars!";
+    const { code } = await authorizeAndCallback(clientId, pkce(verifier));
+    const initial = await exchangeToken(clientId, code, verifier);
+    const rt1 = initial.body.refresh_token as string;
+
+    const refreshed = await refreshExchange(clientId, rt1);
+    expect(refreshed.status).toBe(200);
+    expect(refreshed.body.refresh_token).not.toBe(rt1);
+    const claims = await verifyAccessToken(refreshed.body.access_token as string, PUBLIC_URL, JWT_SECRET);
+    expect(claims).toEqual({ iss: ENTRA_ISS, sub: ENTRA_SUB });
+
+    // replaying the rotated token fails AND kills the newly issued one (family revocation)
+    expect((await refreshExchange(clientId, rt1)).body.error).toBe("invalid_grant");
+    expect((await refreshExchange(clientId, refreshed.body.refresh_token as string)).body.error).toBe("invalid_grant");
+  });
+
+  it("a refresh token is bound to its client", async () => {
+    const clientId = await register();
+    const other = await register();
+    const verifier = "client-bound-verifier-client-bound-43chars!";
+    const { code } = await authorizeAndCallback(clientId, pkce(verifier));
+    const rt = (await exchangeToken(clientId, code, verifier)).body.refresh_token as string;
+
+    expect((await refreshExchange(other, rt)).body.error).toBe("invalid_grant");
+    // and the wrong-client attempt did not burn it
+    expect((await refreshExchange(clientId, rt)).status).toBe(200);
   });
 });
 

@@ -51,10 +51,12 @@ import {
   ACCESS_TOKEN_TTL_S,
   authorizationServerMetadata,
   canonicalResource,
+  issueRefreshToken,
   mintAccessToken,
   mintAuthorizationCode,
   RateLimiter,
   redeemAuthorizationCode,
+  redeemRefreshToken,
   registerClient,
   verifyAccessToken,
 } from "../auth/authz-server.js";
@@ -73,6 +75,8 @@ export interface AppDeps {
   loginService?: LoginService | null;
   /** Directory with the static admin UI, or null to skip mounting. */
   adminUiDir?: string | null;
+  /** Override for the anonymous /oauth/register rate limit (tests only). */
+  oauthRegisterLimit?: { limit: number; windowMs: number };
 }
 
 export type AuthOutcome =
@@ -612,7 +616,10 @@ export function createApp(deps: AppDeps): express.Express {
 
     // RFC 7591 dynamic client registration: anonymous + auto-approve, so it
     // is rate-limited per IP. Public clients only (PKCE carries the proof).
-    const registerLimiter = new RateLimiter(10, 60_000);
+    const registerLimiter = new RateLimiter(
+      deps.oauthRegisterLimit?.limit ?? 10,
+      deps.oauthRegisterLimit?.windowMs ?? 60_000
+    );
     app.post("/oauth/register", (req: Request, res: Response) => {
       if (!registerLimiter.allow(req.ip ?? "unknown")) {
         res.status(429).json({ error: "too_many_requests", error_description: "registration rate limit exceeded — retry later" });
@@ -683,25 +690,59 @@ export function createApp(deps: AppDeps): express.Express {
         res.set("Cache-Control", "no-store");
         const body = (req.body ?? {}) as Record<string, unknown>;
         const param = (name: string): string | undefined => queryParam(body[name]);
-        if (param("grant_type") !== "authorization_code") {
-          res.status(400).json({ error: "unsupported_grant_type", error_description: 'only "authorization_code" is supported' });
-          return;
-        }
-        const code = param("code");
+        const grantType = param("grant_type");
         const tokenClientId = param("client_id");
-        const codeVerifier = param("code_verifier");
-        if (!code || !tokenClientId || !codeVerifier) {
-          res.status(400).json({ error: "invalid_request", error_description: "code, client_id, and code_verifier are required" });
+
+        /** Common success shape for both grants: fresh access + rotated refresh. */
+        const issueTokens = async (principal: { iss: string; sub: string }, refreshToken: string) => {
+          const accessToken = await mintAccessToken(principal, config.publicUrl, jwtSecret);
+          console.error(
+            `[oauth] access token issued to client ${tokenClientId} via ${grantType} (sha256 ${sha256(accessToken).slice(0, 12)}…)`
+          );
+          res.json({
+            access_token: accessToken,
+            token_type: "Bearer",
+            expires_in: ACCESS_TOKEN_TTL_S,
+            refresh_token: refreshToken,
+          });
+        };
+
+        if (grantType === "authorization_code") {
+          const code = param("code");
+          const codeVerifier = param("code_verifier");
+          if (!code || !tokenClientId || !codeVerifier) {
+            res.status(400).json({ error: "invalid_request", error_description: "code, client_id, and code_verifier are required" });
+            return;
+          }
+          const result = redeemAuthorizationCode(deps.repo, { code, clientId: tokenClientId, codeVerifier });
+          if (!result.ok) {
+            res.status(400).json({ error: result.error, error_description: result.description });
+            return;
+          }
+          const refreshToken = issueRefreshToken(deps.repo, { clientId: tokenClientId, principal: result.principal });
+          await issueTokens(result.principal, refreshToken);
           return;
         }
-        const result = redeemAuthorizationCode(deps.repo, { code, clientId: tokenClientId, codeVerifier });
-        if (!result.ok) {
-          res.status(400).json({ error: result.error, error_description: result.description });
+
+        if (grantType === "refresh_token") {
+          const refreshToken = param("refresh_token");
+          if (!refreshToken || !tokenClientId) {
+            res.status(400).json({ error: "invalid_request", error_description: "refresh_token and client_id are required" });
+            return;
+          }
+          const result = redeemRefreshToken(deps.repo, { token: refreshToken, clientId: tokenClientId });
+          if (!result.ok) {
+            res.status(400).json({ error: result.error, error_description: result.description });
+            return;
+          }
+          await issueTokens(result.principal, result.refreshToken);
           return;
         }
-        const accessToken = await mintAccessToken(result.principal, config.publicUrl, jwtSecret);
-        console.error(`[oauth] access token issued to client ${tokenClientId} (sha256 ${sha256(accessToken).slice(0, 12)}…)`);
-        res.json({ access_token: accessToken, token_type: "Bearer", expires_in: ACCESS_TOKEN_TTL_S });
+
+        res.status(400).json({
+          error: "unsupported_grant_type",
+          error_description: 'only "authorization_code" and "refresh_token" are supported',
+        });
       })().catch((err) => {
         console.error(`[oauth] /oauth/token failed: ${String(err)}`);
         if (!res.headersSent) res.status(500).json({ error: "server_error" });

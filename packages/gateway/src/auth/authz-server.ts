@@ -25,6 +25,8 @@ import type { Repo, OauthCodeRow } from "../db/repo.js";
 export const CODE_TTL_MS = 60_000;
 /** Gateway-issued access-token lifetime. */
 export const ACCESS_TOKEN_TTL_S = 3600;
+/** Refresh-token lifetime — sliding: each rotation issues a fresh 30-day token. */
+export const REFRESH_TOKEN_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 const sha256hex = (value: string): string => createHash("sha256").update(value).digest("hex");
 
@@ -40,7 +42,7 @@ export function authorizationServerMetadata(publicUrl: string): Record<string, u
     token_endpoint: `${publicUrl}/oauth/token`,
     registration_endpoint: `${publicUrl}/oauth/register`,
     response_types_supported: ["code"],
-    grant_types_supported: ["authorization_code"],
+    grant_types_supported: ["authorization_code", "refresh_token"],
     code_challenge_methods_supported: ["S256"],
     token_endpoint_auth_methods_supported: ["none"],
   };
@@ -177,6 +179,79 @@ export function redeemAuthorizationCode(
   if (row.clientId !== params.clientId) return invalid;
   if (!pkceChallengeMatches(params.codeVerifier, row.codeChallenge)) return invalid;
   return { ok: true, principal: { iss: row.principalIss, sub: row.principalSub } };
+}
+
+// ── Refresh tokens (rotating; reuse revokes the family) ─────────────────────
+
+/**
+ * Issue a refresh token. For the grant's first token omit `rotatedFrom` —
+ * the token becomes its own family root; rotations pass the predecessor's
+ * hash and stay in the same family.
+ */
+export function issueRefreshToken(
+  repo: Repo,
+  params: {
+    clientId: string;
+    principal: { iss: string; sub: string };
+    familyId?: string;
+    rotatedFrom?: string;
+  },
+  now = Date.now()
+): string {
+  const token = randomBytes(48).toString("base64url");
+  const tokenHash = sha256hex(token);
+  repo.insertOauthRefreshToken({
+    tokenHash,
+    clientId: params.clientId,
+    principalIss: params.principal.iss,
+    principalSub: params.principal.sub,
+    familyId: params.familyId ?? tokenHash,
+    rotatedFrom: params.rotatedFrom ?? null,
+    expiresAt: now + REFRESH_TOKEN_TTL_MS,
+  });
+  return token;
+}
+
+export interface RefreshResult {
+  ok: true;
+  principal: { iss: string; sub: string };
+  /** The rotated successor — the old token is now dead. */
+  refreshToken: string;
+}
+
+/**
+ * Redeem a refresh token: single rotation, client binding, and OAuth 2.1
+ * reuse detection — a replayed (already-rotated) token revokes its entire
+ * family, cutting off whoever holds the live descendant. Failures are the
+ * same opaque invalid_grant.
+ */
+export function redeemRefreshToken(
+  repo: Repo,
+  params: { token: string; clientId: string }
+): RefreshResult | RedemptionError {
+  const invalid: RedemptionError = {
+    ok: false,
+    error: "invalid_grant",
+    description: "refresh token is invalid, expired, revoked, or does not match this client",
+  };
+  const tokenHash = sha256hex(params.token);
+  const result = repo.consumeOauthRefreshToken(tokenHash, params.clientId);
+  if (result.status === "reuse") {
+    const revoked = repo.revokeOauthRefreshFamily(result.familyId);
+    console.error(
+      `[oauth] refresh-token REUSE detected for client ${params.clientId} (sha256 ${tokenHash.slice(0, 12)}…) — revoked ${revoked} token(s) in the family`
+    );
+    return invalid;
+  }
+  if (result.status === "invalid") return invalid;
+  const principal = { iss: result.row.principalIss, sub: result.row.principalSub };
+  const refreshToken = issueRefreshToken(repo, {
+    clientId: params.clientId,
+    principal,
+    familyId: result.row.familyId,
+    rotatedFrom: tokenHash,
+  });
+  return { ok: true, principal, refreshToken };
 }
 
 // ── Gateway-issued access tokens (HS256 JWT, identity only) ─────────────────
