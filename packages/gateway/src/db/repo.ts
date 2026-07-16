@@ -613,9 +613,11 @@ export class Repo {
 
   /** Reuse detected (or admin action): kill every live token in the chain. */
   revokeOauthRefreshFamily(familyId: string): number {
-    return this.db
-      .prepare("UPDATE oauth_refresh_tokens SET revoked_at = datetime('now') WHERE family_id = ? AND revoked_at IS NULL")
-      .run(familyId).changes;
+    return Number(
+      this.db
+        .prepare("UPDATE oauth_refresh_tokens SET revoked_at = datetime('now') WHERE family_id = ? AND revoked_at IS NULL")
+        .run(familyId).changes
+    );
   }
 
   deleteUserCredential(principal: string, upstreamId: string, field: string): boolean {

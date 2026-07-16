@@ -4,11 +4,13 @@ import { openDatabase } from "../db/index.js";
 import { Repo } from "../db/repo.js";
 import {
   authorizationServerMetadata,
+  issueRefreshToken,
   mintAccessToken,
   mintAuthorizationCode,
   pkceChallengeMatches,
   RateLimiter,
   redeemAuthorizationCode,
+  redeemRefreshToken,
   redirectUriAllowed,
   registerClient,
   verifyAccessToken,
@@ -112,6 +114,50 @@ describe("authorization codes + PKCE", () => {
   it("pkceChallengeMatches follows RFC 7636 S256", () => {
     expect(pkceChallengeMatches(verifier, challenge)).toBe(true);
     expect(pkceChallengeMatches("nope", challenge)).toBe(false);
+  });
+});
+
+describe("refresh tokens", () => {
+  const principal = { iss: "https://login.example/t/v2.0", sub: "oid-123" };
+
+  it("rotates on every redemption and keeps the identity", () => {
+    const repo = fresh();
+    const first = issueRefreshToken(repo, { clientId: "c1", principal });
+
+    const second = redeemRefreshToken(repo, { token: first, clientId: "c1" });
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+    expect(second.principal).toEqual(principal);
+    expect(second.refreshToken).not.toBe(first);
+
+    // the successor works too
+    const third = redeemRefreshToken(repo, { token: second.refreshToken, clientId: "c1" });
+    expect(third.ok).toBe(true);
+  });
+
+  it("replaying a rotated token revokes the whole family", () => {
+    const repo = fresh();
+    const first = issueRefreshToken(repo, { clientId: "c1", principal });
+    const second = redeemRefreshToken(repo, { token: first, clientId: "c1" });
+    if (!second.ok) throw new Error("setup failed");
+
+    // replay of the burned token
+    expect(redeemRefreshToken(repo, { token: first, clientId: "c1" }).ok).toBe(false);
+    // …and the live descendant is dead now as well
+    expect(redeemRefreshToken(repo, { token: second.refreshToken, clientId: "c1" }).ok).toBe(false);
+  });
+
+  it("a wrong client neither redeems nor burns the token", () => {
+    const repo = fresh();
+    const token = issueRefreshToken(repo, { clientId: "c1", principal });
+    expect(redeemRefreshToken(repo, { token, clientId: "other" }).ok).toBe(false);
+    // still alive for the right client
+    expect(redeemRefreshToken(repo, { token, clientId: "c1" }).ok).toBe(true);
+  });
+
+  it("unknown tokens are rejected", () => {
+    const repo = fresh();
+    expect(redeemRefreshToken(repo, { token: "made-up", clientId: "c1" }).ok).toBe(false);
   });
 });
 
