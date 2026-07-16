@@ -31,7 +31,10 @@ const config: GatewayConfig = {
   dbPath: ":memory:",
   allowedOrigins: [],
   upstreamsFromFile: [],
-  staticTokens: [],
+  staticTokens: [
+    { token: "tok-admin", roleName: "admin", label: "root" },
+    { token: "tok-viewer", roleName: "viewer", label: "alice" },
+  ],
   oidc: { issuer: ENTRA_ISS, audience: "api://gw", groupsClaim: "groups" },
   login: {
     clientId: "entra-client",
@@ -303,6 +306,32 @@ describe("refresh_token grant", () => {
     // replaying the rotated token fails AND kills the newly issued one (family revocation)
     expect((await refreshExchange(clientId, rt1)).body.error).toBe("invalid_grant");
     expect((await refreshExchange(clientId, refreshed.body.refresh_token as string)).body.error).toBe("invalid_grant");
+  });
+
+  it("admin can list clients and deleting one revokes its refresh tokens", async () => {
+    const clientId = await register();
+    const verifier = "admin-delete-verifier-admin-delete-43chars!";
+    const { code } = await authorizeAndCallback(clientId, pkce(verifier));
+    const rt = (await exchangeToken(clientId, code, verifier)).body.refresh_token as string;
+
+    const adminApi = (path: string, init: RequestInit = {}) =>
+      fetch(`${base}/api${path}`, { ...init, headers: { Authorization: "Bearer tok-admin", ...init.headers } });
+
+    const listed = (await (await adminApi("/oauth-clients")).json()) as Array<{ clientId: string }>;
+    expect(listed.some((c) => c.clientId === clientId)).toBe(true);
+
+    // non-admin is refused
+    expect(
+      (await fetch(`${base}/api/oauth-clients`, { headers: { Authorization: "Bearer tok-viewer" } })).status
+    ).toBe(403);
+
+    expect((await adminApi(`/oauth-clients/${clientId}`, { method: "DELETE" })).status).toBe(200);
+    expect((await adminApi(`/oauth-clients/${clientId}`, { method: "DELETE" })).status).toBe(404);
+
+    // the client's refresh token is dead, and so is the client itself
+    expect((await refreshExchange(clientId, rt)).body.error).toBe("invalid_grant");
+    const again = (await (await adminApi("/oauth-clients")).json()) as Array<{ clientId: string }>;
+    expect(again.some((c) => c.clientId === clientId)).toBe(false);
   });
 
   it("a refresh token is bound to its client", async () => {

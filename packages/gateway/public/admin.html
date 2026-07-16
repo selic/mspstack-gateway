@@ -407,7 +407,8 @@ async function renderRoles() {
 // ── Users ──
 async function renderUsers() {
   const el = $("#tab-users");
-  const [users, { roles }, mappings] = await Promise.all([api("/users"), api("/roles"), api("/group-mappings")]);
+  const [users, { roles }, mappings, oauthClients] = await Promise.all([
+    api("/users"), api("/roles"), api("/group-mappings"), api("/oauth-clients")]);
   const roleOpts = (sel) => `<option value="">(none)</option>` +
     roles.map(r => `<option value="${r.id}" ${sel===r.id?"selected":""}>${esc(r.name)}</option>`).join("");
   el.innerHTML = `
@@ -433,6 +434,19 @@ async function renderUsers() {
         <label>Role <select id="map-role">${roles.map(r => `<option value="${r.id}">${esc(r.name)}</option>`).join("")}</select></label>
         <button class="btn" id="map-add">Add</button>
       </div>
+    </section>
+    <section class="panel"><h2>OAuth clients (DCR)</h2>
+      <p class="muted">MCP clients that registered themselves via the authorization-server facade.
+        Deleting one revokes its refresh tokens; outstanding access tokens expire within an hour.</p>
+      ${oauthClients.length ? `<table>
+        <tr><th>Name</th><th>Client id</th><th>Redirect URIs</th><th>Registered</th><th></th></tr>
+        ${oauthClients.map(c => `<tr>
+          <td>${esc(c.clientName || "—")}</td>
+          <td class="mono">${esc(c.clientId)}</td>
+          <td class="mono">${c.redirectUris.map(esc).join("<br>")}</td>
+          <td class="muted">${esc(c.createdAt)}</td>
+          <td><button class="btn danger" data-del-client="${esc(c.clientId)}">Delete</button></td>
+        </tr>`).join("")}</table>` : '<p class="muted">No registered clients.</p>'}
     </section>`;
   el.onchange = async (ev) => {
     const s = ev.target; if (!s.dataset.user) return;
@@ -442,6 +456,13 @@ async function renderUsers() {
     } catch (e) { toast(e.message, true); }
   };
   el.onclick = async (ev) => {
+    const c = ev.target.closest("[data-del-client]");
+    if (c) {
+      if (!confirm(`Delete OAuth client ${c.dataset.delClient}? Its refresh tokens are revoked immediately.`)) return;
+      try { await api("/oauth-clients/" + encodeURIComponent(c.dataset.delClient), { method: "DELETE" }); renderUsers(); }
+      catch (e) { toast(e.message, true); }
+      return;
+    }
     const b = ev.target.closest("[data-del-map]"); if (!b) return;
     try { await api("/group-mappings/" + b.dataset.delMap, { method: "DELETE" }); renderUsers(); }
     catch (e) { toast(e.message, true); }
