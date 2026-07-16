@@ -46,6 +46,16 @@ import {
   type LoginService,
 } from "../auth/login.js";
 import { PRM_PATH, prmDocument, wwwAuthenticate } from "../auth/prm.js";
+import {
+  ACCESS_TOKEN_TTL_S,
+  authorizationServerMetadata,
+  canonicalResource,
+  mintAccessToken,
+  mintAuthorizationCode,
+  RateLimiter,
+  redeemAuthorizationCode,
+  registerClient,
+} from "../auth/authz-server.js";
 import { createGatewayServer, SERVER_NAME, SERVER_VERSION } from "../mcp/gateway-server.js";
 import { createAdminRouter } from "./admin-api.js";
 import { createMeRouter } from "./me-api.js";
@@ -483,6 +493,25 @@ export function createApp(deps: AppDeps): express.Express {
         // Persist the resolved role so the cookie path resolves it from the
         // stored user row (approach b) — no privilege ever rides in the cookie.
         if (role) deps.repo.setUserRole(user.id, role.id);
+        // OAuth AS facade: this login was brokering user authentication for an
+        // MCP client — mint a single-use code bound to the pending request and
+        // bounce to the client's registered redirect_uri (validated at
+        // /oauth/authorize; the transient cookie is HMAC-signed, so the
+        // pending request cannot have been tampered with).
+        if (transient.oauth) {
+          const code = mintAuthorizationCode(deps.repo, transient.oauth, {
+            iss: identity.iss,
+            sub: identity.sub,
+          });
+          const target = new URL(transient.oauth.redirectUri);
+          target.searchParams.set("code", code);
+          if (transient.oauth.state !== null) target.searchParams.set("state", transient.oauth.state);
+          console.error(
+            `[oauth] authorization granted to client ${transient.oauth.clientId} for ${identity.email ?? identity.sub}`
+          );
+          res.redirect(302, target.href);
+          return;
+        }
         res.cookie(
           SESSION_COOKIE,
           mintSessionCookieValue({ iss: identity.iss, sub: identity.sub }, login.sessionSecret),
@@ -503,6 +532,123 @@ export function createApp(deps: AppDeps): express.Express {
     };
     app.post("/auth/logout", logout);
     app.get("/auth/logout", logout);
+
+    // ── OAuth Authorization Server facade (DCR) ──────────────
+    // The gateway is the authorization server standard MCP clients talk to
+    // (Entra has no anonymous DCR); the user-authentication leg reuses the
+    // Entra confidential-client login above. Mounted only when login is
+    // configured — otherwise these endpoints 404 and PRM keeps pointing at
+    // the raw IdP (today's behavior).
+    const jwtSecret = config.gatewayJwtSecret!; // set whenever login is configured
+    const queryParam = (value: unknown): string | undefined => {
+      const v = Array.isArray(value) ? value[0] : value;
+      return typeof v === "string" && v.length > 0 ? v : undefined;
+    };
+
+    // RFC 8414 metadata (+ the path-suffix variant some clients probe).
+    const serveAsMetadata = (_req: Request, res: Response): void => {
+      res.json(authorizationServerMetadata(config.publicUrl));
+    };
+    app.get("/.well-known/oauth-authorization-server", serveAsMetadata);
+    app.get("/.well-known/oauth-authorization-server/mcp", serveAsMetadata);
+
+    // RFC 7591 dynamic client registration: anonymous + auto-approve, so it
+    // is rate-limited per IP. Public clients only (PKCE carries the proof).
+    const registerLimiter = new RateLimiter(10, 60_000);
+    app.post("/oauth/register", (req: Request, res: Response) => {
+      if (!registerLimiter.allow(req.ip ?? "unknown")) {
+        res.status(429).json({ error: "too_many_requests", error_description: "registration rate limit exceeded — retry later" });
+        return;
+      }
+      const result = registerClient(deps.repo, req.body);
+      if (!result.ok) {
+        res.status(400).json({ error: result.error, error_description: result.description });
+        return;
+      }
+      res.status(201).json({
+        client_id: result.clientId,
+        ...(result.clientName ? { client_name: result.clientName } : {}),
+        redirect_uris: result.redirectUris,
+        token_endpoint_auth_method: "none",
+        client_id_issued_at: Math.floor(Date.now() / 1000),
+      });
+    });
+
+    // Authorization endpoint: validate the request, then broker the user-
+    // authentication leg to Entra by piggybacking on the interactive login —
+    // the pending request rides in the signed transient cookie and the
+    // callback above mints the code.
+    app.get("/oauth/authorize", (req: Request, res: Response) => {
+      void (async () => {
+        const clientId = queryParam(req.query.client_id);
+        const redirectUri = queryParam(req.query.redirect_uri);
+        const client = clientId ? deps.repo.oauthClient(clientId) : null;
+        // Per RFC 6749 §4.1.2.1: an invalid client or redirect_uri must NOT
+        // redirect — that would be an open redirect.
+        if (!client || !redirectUri || !client.redirectUris.includes(redirectUri)) {
+          res.status(400).send("Invalid client_id or redirect_uri. Clients register via POST /oauth/register (RFC 7591).");
+          return;
+        }
+        const state = queryParam(req.query.state) ?? null;
+        const fail = (error: string, description: string): void => {
+          const target = new URL(redirectUri);
+          target.searchParams.set("error", error);
+          target.searchParams.set("error_description", description);
+          if (state !== null) target.searchParams.set("state", state);
+          res.redirect(302, target.href);
+        };
+        if (queryParam(req.query.response_type) !== "code") {
+          return fail("unsupported_response_type", 'only response_type "code" is supported');
+        }
+        const codeChallenge = queryParam(req.query.code_challenge);
+        if (!codeChallenge || queryParam(req.query.code_challenge_method) !== "S256") {
+          return fail("invalid_request", "PKCE is required: code_challenge + code_challenge_method=S256");
+        }
+        const resource = queryParam(req.query.resource) ?? null;
+        if (resource !== null && resource !== canonicalResource(config.publicUrl)) {
+          return fail("invalid_target", `unknown resource — this server protects ${canonicalResource(config.publicUrl)}`);
+        }
+        const { redirectUrl, transient } = await loginService.startAuth("/me");
+        transient.oauth = { clientId: client.clientId, redirectUri, codeChallenge, state, resource };
+        res.cookie(TRANSIENT_COOKIE, mintTransientCookieValue(transient, login.sessionSecret), transientCookieOpts);
+        res.redirect(302, redirectUrl);
+      })().catch((err) => {
+        console.error(`[oauth] /oauth/authorize failed: ${String(err)}`);
+        if (!res.headersSent) res.status(500).send("Authorization initialization failed");
+      });
+    });
+
+    // Token endpoint: authorization_code + PKCE → gateway-issued JWT. The
+    // token carries identity only; the role is re-resolved on every request.
+    app.post("/oauth/token", express.urlencoded({ extended: false }), (req: Request, res: Response) => {
+      void (async () => {
+        res.set("Cache-Control", "no-store");
+        const body = (req.body ?? {}) as Record<string, unknown>;
+        const param = (name: string): string | undefined => queryParam(body[name]);
+        if (param("grant_type") !== "authorization_code") {
+          res.status(400).json({ error: "unsupported_grant_type", error_description: 'only "authorization_code" is supported' });
+          return;
+        }
+        const code = param("code");
+        const tokenClientId = param("client_id");
+        const codeVerifier = param("code_verifier");
+        if (!code || !tokenClientId || !codeVerifier) {
+          res.status(400).json({ error: "invalid_request", error_description: "code, client_id, and code_verifier are required" });
+          return;
+        }
+        const result = redeemAuthorizationCode(deps.repo, { code, clientId: tokenClientId, codeVerifier });
+        if (!result.ok) {
+          res.status(400).json({ error: result.error, error_description: result.description });
+          return;
+        }
+        const accessToken = await mintAccessToken(result.principal, config.publicUrl, jwtSecret);
+        console.error(`[oauth] access token issued to client ${tokenClientId} (sha256 ${sha256(accessToken).slice(0, 12)}…)`);
+        res.json({ access_token: accessToken, token_type: "Bearer", expires_in: ACCESS_TOKEN_TTL_S });
+      })().catch((err) => {
+        console.error(`[oauth] /oauth/token failed: ${String(err)}`);
+        if (!res.headersSent) res.status(500).json({ error: "server_error" });
+      });
+    });
 
     // Light browser-navigation gate for the user-facing pages. Only redirects
     // HTML GETs with no session; /api/* is NOT gated (server-side auth is the

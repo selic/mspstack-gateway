@@ -20,6 +20,10 @@
  *   AUTH_CLIENT_SECRET               its client secret
  *   AUTH_REDIRECT_URI                callback URL (default ${PUBLIC_URL}/auth/callback)
  *   SESSION_SECRET                   HMAC key for the session/transient cookies
+ *   GATEWAY_JWT_SECRET               HS256 key for gateway-issued access tokens
+ *                                    (OAuth AS facade; defaults to a key derived
+ *                                    from SESSION_SECRET — a separate knob keeps
+ *                                    rotation independent)
  *
  *   GATEWAY_MODE                     standalone (default) | integrated — integrated
  *                                    requires KEY_VAULT_URI + OIDC (refuses to start otherwise)
@@ -35,6 +39,7 @@
  */
 
 import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { z } from "zod";
 
 export class ConfigError extends Error {}
@@ -146,6 +151,12 @@ export interface GatewayConfig {
   oidc: OidcConfig | null;
   /** Interactive login (cookie + PKCE), or null when not configured. */
   login: LoginConfig | null;
+  /**
+   * HS256 key for gateway-issued access tokens (the OAuth AS facade). Set
+   * whenever login is configured: GATEWAY_JWT_SECRET, or derived from
+   * SESSION_SECRET so existing deployments need no new mandatory env.
+   */
+  gatewayJwtSecret: string | null;
   adminBootstrapSubjects: string[];
   devAllowUnauthenticated: boolean;
   bao: BaoConfig | null;
@@ -352,6 +363,16 @@ export function loadConfig(
     };
   }
 
+  // ── Gateway-issued token key (OAuth AS facade) ──
+  const explicitJwtSecret = cleanEnv(env.GATEWAY_JWT_SECRET);
+  if (explicitJwtSecret && explicitJwtSecret.length < 16) {
+    throw new ConfigError("GATEWAY_JWT_SECRET must be at least 16 characters (it signs gateway access tokens)");
+  }
+  const gatewayJwtSecret = login
+    ? (explicitJwtSecret ??
+      createHash("sha256").update(`gateway-jwt:${login.sessionSecret}`).digest("hex"))
+    : null;
+
   // ── OpenBao ──
   const baoAddr = cleanEnv(env.BAO_ADDR);
   let bao: BaoConfig | null = null;
@@ -417,6 +438,7 @@ export function loadConfig(
     staticTokens: parseStaticTokens(env),
     oidc,
     login,
+    gatewayJwtSecret,
     adminBootstrapSubjects: (env.ADMIN_BOOTSTRAP_SUBJECTS ?? "")
       .split(",")
       .map((s) => s.trim().toLowerCase())

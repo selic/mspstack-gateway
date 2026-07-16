@@ -20,6 +20,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import * as client from "openid-client";
 import type { JWTPayload } from "jose";
 import { identityFromPayload, type OidcIdentity } from "./oidc.js";
+import type { PendingAuthorization } from "./authz-server.js";
 import type { LoginConfig, OidcConfig } from "../config.js";
 
 /** Scopes requested at the authorization endpoint. */
@@ -39,6 +40,13 @@ export interface TransientState {
   nonce: string;
   state: string;
   returnTo: string;
+  /**
+   * Pending /oauth/authorize request when this login attempt is brokering
+   * user authentication for an MCP client (the OAuth AS facade). The callback
+   * then mints a single-use authorization code and redirects to the client's
+   * registered redirect_uri instead of returnTo.
+   */
+  oauth?: PendingAuthorization;
 }
 
 /** What the session cookie carries — identity only, never privilege. */
@@ -192,7 +200,36 @@ export function readTransientState(
   ) {
     return null;
   }
-  return { codeVerifier: p.codeVerifier, nonce: p.nonce, state: p.state, returnTo: p.returnTo };
+  const oauth = readPendingAuthorization(p.oauth);
+  if (p.oauth !== undefined && !oauth) return null; // present but malformed → reject the attempt
+  return {
+    codeVerifier: p.codeVerifier,
+    nonce: p.nonce,
+    state: p.state,
+    returnTo: p.returnTo,
+    ...(oauth ? { oauth } : {}),
+  };
+}
+
+function readPendingAuthorization(raw: unknown): PendingAuthorization | null {
+  if (!raw || typeof raw !== "object") return null;
+  const o = raw as Record<string, unknown>;
+  if (
+    typeof o.clientId !== "string" ||
+    typeof o.redirectUri !== "string" ||
+    typeof o.codeChallenge !== "string" ||
+    (o.state !== null && typeof o.state !== "string") ||
+    (o.resource !== null && typeof o.resource !== "string")
+  ) {
+    return null;
+  }
+  return {
+    clientId: o.clientId,
+    redirectUri: o.redirectUri,
+    codeChallenge: o.codeChallenge,
+    state: o.state,
+    resource: o.resource,
+  };
 }
 
 /** Minimal Cookie-header parser (avoids a cookie-parser dependency). */

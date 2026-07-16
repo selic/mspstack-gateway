@@ -78,6 +78,7 @@ const config: GatewayConfig = {
   ],
   oidc: null,
   login: null,
+  gatewayJwtSecret: null,
   adminBootstrapSubjects: [],
   devAllowUnauthenticated: false,
   bao: null,
