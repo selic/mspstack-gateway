@@ -21,6 +21,7 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import express, { type Request, type Response } from "express";
+import { decodeJwt } from "jose";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
@@ -55,6 +56,7 @@ import {
   RateLimiter,
   redeemAuthorizationCode,
   registerClient,
+  verifyAccessToken,
 } from "../auth/authz-server.js";
 import { createGatewayServer, SERVER_NAME, SERVER_VERSION } from "../mcp/gateway-server.js";
 import { createAdminRouter } from "./admin-api.js";
@@ -111,6 +113,19 @@ export function originAllowed(origin: string | undefined, allowedOrigins: string
   }
   if (hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]") return true;
   return allowedOrigins.includes(origin.replace(/\/+$/, ""));
+}
+
+/**
+ * Route a bearer to the right verifier by the token's own (unverified) iss
+ * claim. Purely a dispatch hint — the actual trust decision is the signature
+ * check that follows. Non-JWT bearers (static tokens) simply return false.
+ */
+function claimsOurIssuer(token: string, publicUrl: string): boolean {
+  try {
+    return decodeJwt(token).iss === publicUrl;
+  } catch {
+    return false;
+  }
 }
 
 /** Shared 403 message for authenticated-but-unmapped principals (bearer + cookie). */
@@ -189,8 +204,43 @@ export function createAuthResolver(deps: AppDeps) {
       };
     }
 
-    // 2. OIDC JWT.
+    // 2. Gateway-issued access tokens (the OAuth AS facade). Routed by the
+    // token's own (unverified) iss claim: our issuer is PUBLIC_URL, which no
+    // IdP-issued token carries, so the two bearer paths cannot shadow each
+    // other. Verification checks signature/iss/aud/exp; the token carries
+    // identity only and the role is re-resolved here on every request —
+    // exactly like the cookie session, a token never carries privilege.
     const token = bearerToken(header);
+    if (token && config.gatewayJwtSecret && claimsOurIssuer(token, config.publicUrl)) {
+      const cacheKey = sha256(token);
+      const cached = cache.get(cacheKey);
+      if (cached && Date.now() < cached.expiresAt) {
+        return { ok: true, principal: cached.principal };
+      }
+      let identity: { iss: string; sub: string };
+      try {
+        identity = await verifyAccessToken(token, config.publicUrl, config.gatewayJwtSecret);
+      } catch (err) {
+        return unauthorized(`Invalid token: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      const role = repo.resolveOidcRole(identity.iss, identity.sub, []);
+      if (!role) {
+        return { ok: false, status: 403, code: -32003, message: NO_ROLE_MESSAGE };
+      }
+      const user = repo.userBySubject(identity.iss, identity.sub);
+      const principal: Principal = {
+        kind: "oidc",
+        subject: `${identity.iss}|${identity.sub}`,
+        label: user?.email ?? user?.displayName ?? identity.sub,
+        roleId: role.id,
+        roleName: role.name,
+        isAdmin: role.isAdmin,
+      };
+      cache.set(cacheKey, { principal, expiresAt: Date.now() + CACHE_TTL_MS });
+      return { ok: true, principal };
+    }
+
+    // 3. OIDC JWT from the configured IdP.
     if (token && oidcVerifier) {
       const cacheKey = sha256(token);
       const cached = cache.get(cacheKey);
@@ -219,7 +269,7 @@ export function createAuthResolver(deps: AppDeps) {
       return { ok: true, principal };
     }
 
-    // 3. Interactive-login cookie session. Only when there is no Authorization
+    // 4. Interactive-login cookie session. Only when there is no Authorization
     // bearer (bearer paths above stay the sole path for MCP clients / CI). The
     // cookie carries ONLY identity — the role is re-resolved here every request
     // from the stored user row (persisted at callback time), so a session id
@@ -247,7 +297,7 @@ export function createAuthResolver(deps: AppDeps) {
       }
     }
 
-    // 4. Explicit dev escape hatch.
+    // 5. Explicit dev escape hatch.
     if (!token && config.devAllowUnauthenticated) {
       const admin = repo.roleByName("admin");
       if (admin) {
@@ -316,7 +366,15 @@ export function createApp(deps: AppDeps): express.Express {
       res.status(404).json({ error: "OAuth is not configured on this gateway" });
       return;
     }
-    res.json(prmDocument(config.publicUrl, config.oidc));
+    // With the AS facade enabled (interactive login configured) the gateway
+    // is the authorization server clients should discover — it supports DCR,
+    // which the raw IdP (Entra) does not.
+    res.json(
+      prmDocument(
+        config.publicUrl,
+        config.login && deps.loginService ? [config.publicUrl] : [config.oidc.issuer]
+      )
+    );
   };
   app.get(PRM_PATH, servePrm);
   app.get(`${PRM_PATH}/mcp`, servePrm); // path-scoped variant some clients probe
