@@ -90,6 +90,14 @@ table, preserving the "a session id never carries privilege" invariant.
 
 ### 2.3 Persistence (`src/db/`)
 
+SQLite is correct here: the integrated-mode design (MSPStack repo,
+`docs/plans/gateway-integrated-mode.md`) fixes "gateway SQLite is the single writer
+for its own state" — Postgres belongs to the hub, and SQLite→Postgres convergence is
+an open item gated on a multi-instance gateway. Note for that future item: AS state
+(single-use codes, client registrations) must move too — single-use enforcement
+breaks across instances otherwise. If the DB is ever wiped, registered clients just
+re-register via DCR (clients handle `invalid_client` by re-registering).
+
 New tables (follow the existing `Repo` pattern in `src/db/repo.ts`):
 - `oauth_clients(client_id PK, client_name, redirect_uris_json, created_at)`
 - `oauth_codes(code_hash PK, client_id, principal_iss, principal_sub, code_challenge,
