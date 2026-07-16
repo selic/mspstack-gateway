@@ -4,6 +4,7 @@ dist/
 *.log
 .env
 .env.*
+!.env.example
 mspstack.config.local.json
 data/
 # copied from the repo root by the gateway package's prepack script
