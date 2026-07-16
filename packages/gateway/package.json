@@ -1,6 +1,6 @@
 {
   "name": "@mspstack/mcp-gateway",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Self-hosted MCP gateway: one streamable-HTTP endpoint federating many MCP servers with namespaced tools, per-tool toggles, roles, and secure upstream credential injection",
   "type": "module",
   "main": "dist/index.js",

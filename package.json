@@ -1,7 +1,7 @@
 {
   "name": "mcp-gateway-monorepo",
   "private": true,
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "MSPStack Gateway — self-hosted MCP manager: one endpoint federating many MCP servers with OAuth, roles, secret storage, and tool toggles",
   "type": "module",
   "workspaces": [

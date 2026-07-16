@@ -17,7 +17,7 @@ import type { PolicyService } from "../domain/policy.js";
 import type { UpstreamManager } from "../upstream/manager.js";
 
 export const SERVER_NAME = "mspstack-gateway";
-export const SERVER_VERSION = "0.2.0";
+export const SERVER_VERSION = "0.4.0";
 
 /** Field→secretRef map of the principal's registered creds for an upstream. */
 export type PersonalCredsLookup = (upstreamId: string) => Record<string, string>;
