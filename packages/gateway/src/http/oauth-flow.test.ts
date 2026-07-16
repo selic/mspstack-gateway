@@ -16,7 +16,7 @@ import { PolicyService } from "../domain/policy.js";
 import { UpstreamManager } from "../upstream/manager.js";
 import type { GatewayConfig } from "../config.js";
 import type { LoginService } from "../auth/login.js";
-import { verifyAccessToken } from "../auth/authz-server.js";
+import { mintAccessToken, verifyAccessToken } from "../auth/authz-server.js";
 import { createApp } from "./app.js";
 
 const PUBLIC_URL = "http://gw.test";
@@ -271,5 +271,79 @@ describe("OAuth AS facade — security invariants", () => {
     });
     expect(response.status).toBe(400);
     expect(((await response.json()) as { error: string }).error).toBe("unsupported_grant_type");
+  });
+});
+
+describe("gateway-token auth on /mcp + PRM discovery", () => {
+  const initBody = {
+    jsonrpc: "2.0",
+    id: 1,
+    method: "initialize",
+    params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "0" } },
+  };
+
+  const postMcp = (token?: string) =>
+    fetch(`${base}/mcp`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json, text/event-stream",
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify(initBody),
+    });
+
+  it("PRM lists the gateway itself as the authorization server", async () => {
+    const response = await fetch(`${base}/.well-known/oauth-protected-resource`);
+    expect(response.status).toBe(200);
+    const prm = (await response.json()) as { resource: string; authorization_servers: string[] };
+    expect(prm.resource).toBe(`${PUBLIC_URL}/mcp`);
+    expect(prm.authorization_servers).toEqual([PUBLIC_URL]);
+  });
+
+  it("a token from the full DCR flow authenticates an MCP session", async () => {
+    const clientId = await register();
+    const verifier = "mcp-verifier-mcp-verifier-mcp-verifier-43ch";
+    const { code } = await authorizeAndCallback(clientId, pkce(verifier));
+    const { body } = await exchangeToken(clientId, code, verifier);
+
+    const response = await postMcp(body.access_token as string);
+    expect(response.status).toBe(200);
+    expect(response.headers.get("mcp-session-id")).toBeTruthy();
+  });
+
+  it("a gateway token for a user with no role is 403, tampered tokens are 401", async () => {
+    const stranger = await mintAccessToken({ iss: ENTRA_ISS, sub: "oid-nobody" }, PUBLIC_URL, JWT_SECRET);
+    expect((await postMcp(stranger)).status).toBe(403);
+
+    const forged = await mintAccessToken({ iss: ENTRA_ISS, sub: ENTRA_SUB }, PUBLIC_URL, "wrong-secret-wrong-secret");
+    expect((await postMcp(forged)).status).toBe(401);
+
+    expect((await postMcp()).status).toBe(401);
+  });
+
+  it("without interactive login the PRM keeps pointing at the raw IdP (regression)", async () => {
+    const bare = createApp({
+      config: { ...config, login: null, gatewayJwtSecret: null },
+      repo: new Repo(openDatabase(":memory:")),
+      manager: new UpstreamManager([], () => {
+        throw new Error("unused");
+      }),
+      policy: new PolicyService(new Repo(openDatabase(":memory:"))),
+      secretStore: null,
+      oidcVerifier: null,
+      adminUiDir: null,
+    });
+    const server = bare.listen(0);
+    try {
+      const port = (server.address() as AddressInfo).port;
+      const prm = await fetch(`http://localhost:${port}/.well-known/oauth-protected-resource`);
+      expect(((await prm.json()) as { authorization_servers: string[] }).authorization_servers).toEqual([ENTRA_ISS]);
+      // and the AS endpoints are not mounted
+      expect((await fetch(`http://localhost:${port}/.well-known/oauth-authorization-server`)).status).toBe(404);
+      expect((await fetch(`http://localhost:${port}/oauth/register`, { method: "POST" })).status).toBe(404);
+    } finally {
+      server.close();
+    }
   });
 });
