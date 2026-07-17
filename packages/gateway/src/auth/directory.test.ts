@@ -82,6 +82,33 @@ describe("createDirectorySearch", () => {
     expect(calls).toEqual([]);
   });
 
+  it("namesByIds resolves via getByIds, caches, and swallows failures", async () => {
+    const calls: string[] = [];
+    let fail = false;
+    const fetchImpl = (async (input: string | URL | Request, init?: RequestInit) => {
+      const url = String(input);
+      calls.push(url);
+      if (url.includes("/oauth2/v2.0/token")) {
+        return new Response(JSON.stringify({ access_token: "t", expires_in: 3600 }), { status: 200 });
+      }
+      if (fail) return new Response("boom", { status: 500 });
+      const body = JSON.parse(String(init?.body)) as { ids: string[] };
+      return new Response(
+        JSON.stringify({ value: body.ids.filter((id) => id !== "ghost").map((id) => ({ id, displayName: `Name-${id}` })) }),
+        { status: 200 }
+      );
+    }) as unknown as typeof fetch;
+
+    const search = createDirectorySearch(oidc, login, fetchImpl)!;
+    expect(await search.namesByIds(["g1", "ghost"])).toEqual({ g1: "Name-g1" });
+    // cached: no second getByIds for g1
+    expect(await search.namesByIds(["g1"])).toEqual({ g1: "Name-g1" });
+    expect(calls.filter((u) => u.includes("getByIds")).length).toBe(1);
+    // failures degrade to {} (labels are cosmetic)
+    fail = true;
+    expect(await search.namesByIds(["g2"])).toEqual({});
+  });
+
   it("surfaces Graph failures as thrown errors (the API maps them to 502)", async () => {
     const failing = (async () => new Response("nope", { status: 403 })) as unknown as typeof fetch;
     const search = createDirectorySearch(oidc, login, failing)!;

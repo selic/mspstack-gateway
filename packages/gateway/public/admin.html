@@ -424,8 +424,11 @@ async function renderUsers() {
     </section>
     <section class="panel"><h2>Group → role mappings</h2>
       ${mappings.length ? `<table>
-        <tr><th>Issuer</th><th>Group claim</th><th>Role</th><th></th></tr>
-        ${mappings.map(m => `<tr><td class="mono">${esc(m.iss)}</td><td class="mono">${esc(m.claimValue)}</td>
+        <tr><th>Issuer</th><th>Group</th><th>Role</th><th></th></tr>
+        ${mappings.map(m => `<tr><td class="mono">${esc(m.iss)}</td>
+          <td>${m.claimLabel
+            ? `<div>👥 ${esc(m.claimLabel)}</div><div class="cellsub mono">${esc(m.claimValue)}</div>`
+            : `<span class="mono">${esc(m.claimValue)}</span>`}</td>
           <td>${esc((roles.find(r => r.id === m.roleId) || {}).name || m.roleId)}</td>
           <td><button class="btn danger" data-del-map="${m.id}">Delete</button></td></tr>`).join("")}</table>` : '<p class="muted">No mappings.</p>'}
       <div class="row" style="margin-top:10px">

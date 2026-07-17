@@ -30,6 +30,13 @@ export interface DirectoryResult {
 
 export interface DirectorySearch {
   search(query: string, type: "user" | "group" | "all"): Promise<DirectoryResult[]>;
+  /**
+   * Resolve object ids → display names (users and groups), for showing
+   * friendly labels next to stored GUIDs. Unknown/deleted ids are simply
+   * absent from the result; failures resolve to {} so callers degrade to
+   * showing the raw id.
+   */
+  namesByIds(ids: string[]): Promise<Record<string, string>>;
 }
 
 /** Extract the tenant id from an Entra v2 issuer URL; null for non-Entra issuers. */
@@ -98,7 +105,42 @@ export function createDirectorySearch(
     return json.value ?? [];
   };
 
+  // id → display name, cached (renames surface within the TTL).
+  const nameCache = new Map<string, { name: string; expiresAt: number }>();
+  const NAME_TTL_MS = 60 * 60 * 1000;
+
   return {
+    async namesByIds(ids) {
+      const out: Record<string, string> = {};
+      const now = Date.now();
+      const missing: string[] = [];
+      for (const id of new Set(ids)) {
+        const cached = nameCache.get(id);
+        if (cached && now < cached.expiresAt) out[id] = cached.name;
+        else missing.push(id);
+      }
+      if (missing.length === 0) return out;
+      try {
+        const token = await getAppToken();
+        const response = await fetchImpl(`${GRAPH}/directoryObjects/getByIds`, {
+          method: "POST",
+          headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+          body: JSON.stringify({ ids: missing, types: ["group", "user"] }),
+        });
+        if (!response.ok) throw new Error(`getByIds failed: ${response.status}`);
+        const json = (await response.json()) as { value?: Array<{ id?: string; displayName?: string }> };
+        for (const obj of json.value ?? []) {
+          if (!obj.id || typeof obj.displayName !== "string") continue;
+          out[obj.id] = obj.displayName;
+          nameCache.set(obj.id, { name: obj.displayName, expiresAt: now + NAME_TTL_MS });
+        }
+      } catch (err) {
+        // Labels are cosmetic — never fail the caller over them.
+        console.error(`[directory] name lookup failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      return out;
+    },
+
     async search(query, type) {
       const term = sanitize(query);
       if (term.length < 2) return [];
