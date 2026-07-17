@@ -235,6 +235,9 @@ describe("admin directory search endpoint", () => {
       async search(query: string, type: string) {
         return [{ kind: "group" as const, id: "g1", displayName: `hit:${query}:${type}`, secondary: "" }];
       },
+      async namesByIds(ids: string[]) {
+        return Object.fromEntries(ids.filter((id) => id === "known-guid").map((id) => [id, "Known Group"]));
+      },
     };
     const app = createApp({
       config,
@@ -266,6 +269,22 @@ describe("admin directory search endpoint", () => {
         headers: { Authorization: "Bearer tok-admin" },
       });
       expect(await short.json()).toEqual({ configured: true, results: [] });
+
+      // group-mappings are enriched with directory display names when resolvable
+      const editor = repo.roleByName("editor")!;
+      repo.setGroupMapping("https://idp", "known-guid", editor.id);
+      repo.setGroupMapping("https://idp", "unknown-guid", editor.id);
+      try {
+        const mappings = (await (
+          await fetch(`http://localhost:${port}/api/group-mappings`, {
+            headers: { Authorization: "Bearer tok-admin" },
+          })
+        ).json()) as Array<{ claimValue: string; claimLabel: string | null }>;
+        expect(mappings.find((m) => m.claimValue === "known-guid")?.claimLabel).toBe("Known Group");
+        expect(mappings.find((m) => m.claimValue === "unknown-guid")?.claimLabel).toBeNull();
+      } finally {
+        for (const m of repo.listGroupMappings()) repo.deleteGroupMapping(m.id);
+      }
     } finally {
       server.close();
     }
