@@ -432,7 +432,7 @@ async function renderUsers() {
           <td>${esc((roles.find(r => r.id === m.roleId) || {}).name || m.roleId)}</td>
           <td><button class="btn danger" data-del-map="${m.id}">Delete</button></td></tr>`).join("")}</table>` : '<p class="muted">No mappings.</p>'}
       <div class="row" style="margin-top:10px">
-        <label style="flex:2">Issuer <input id="map-iss" placeholder="https://login.microsoftonline.com/…/v2.0" style="width:100%" value="${esc(status.oidc?.issuer ?? "")}"></label>
+        <label style="flex:2; ${status.oidc?.issuer ? "display:none" : ""}" id="map-iss-wrap">Issuer <input id="map-iss" placeholder="https://login.microsoftonline.com/…/v2.0" style="width:100%" value="${esc(status.oidc?.issuer ?? "")}"></label>
         <label style="position:relative">Group / claim value
           <input id="map-claim" placeholder="search group by name, or object id" autocomplete="off">
           <div id="map-claim-results" style="position:absolute; z-index:20; top:100%; left:0; min-width:280px; display:none; background:var(--panel); border:1px solid var(--border); border-radius:6px; max-height:240px; overflow-y:auto; box-shadow:0 6px 20px rgba(0,0,0,.3)"></div>
@@ -440,6 +440,8 @@ async function renderUsers() {
         <label>Role <select id="map-role">${roles.map(r => `<option value="${r.id}">${esc(r.name)}</option>`).join("")}</select></label>
         <button class="btn" id="map-add">Add</button>
       </div>
+      ${status.oidc?.issuer ? `<p class="cellsub" style="margin:6px 0 0">Mappings apply to the configured issuer.
+        <a href="#" id="map-advanced" style="color:inherit">advanced…</a></p>` : ""}
     </section>
     <section class="panel"><h2>OAuth clients (DCR)</h2>
       <p class="muted">MCP clients that registered themselves via the authorization-server facade.
@@ -515,6 +517,15 @@ async function renderUsers() {
     hideClaimResults();
   };
   claimInput.onblur = () => setTimeout(hideClaimResults, 150);
+
+  // Issuer is prefilled from the configured OIDC issuer and hidden by default —
+  // only multi-IdP setups ever edit it.
+  const advanced = $("#map-advanced");
+  if (advanced) advanced.onclick = (ev) => {
+    ev.preventDefault();
+    $("#map-iss-wrap").style.display = "";
+    advanced.style.display = "none";
+  };
 }
 
 // ── Secrets ──
